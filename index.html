@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LP Meeting Copilot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+KR:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ["Inter", "Noto Sans KR", "sans-serif"] },
+          colors: {
+            brand: {
+              50: "#eff6ff",
+              100: "#dbeafe",
+              500: "#3b82f6",
+              600: "#2563eb",
+              700: "#1d4ed8"
+            }
+          }
+        }
+      }
+    };
+  </script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body class="h-screen overflow-hidden bg-slate-50 text-slate-900 antialiased">
+  <div class="flex h-full min-h-0">
+    <aside class="hidden w-64 shrink-0 flex-col bg-slate-900 text-slate-300 md:flex">
+      <div class="flex h-16 items-center gap-3 border-b border-slate-800 px-5 text-lg font-bold text-white">
+        <div class="rounded-lg bg-brand-600 p-1.5 text-white">
+          <i data-lucide="compass" class="h-5 w-5"></i>
+        </div>
+        Meeting Copilot
+      </div>
+
+      <div class="p-4">
+        <button id="newMeetingButton" class="flex w-full items-center justify-center gap-2 rounded-md bg-brand-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-brand-500">
+          <i data-lucide="plus" class="h-4 w-4"></i>
+          새 미팅
+        </button>
+      </div>
+
+      <div class="min-h-0 flex-1 overflow-y-auto px-3">
+        <div class="mb-3 mt-2 px-2 text-xs font-bold uppercase tracking-wider text-slate-500">최근 미팅</div>
+        <div class="mb-3 rounded-md bg-slate-800/70 px-3 py-2 text-xs leading-5 text-slate-400">
+          저장 버튼을 누르면 최근 미팅에 추가됩니다. 저장된 미팅은 편집 시 자동 최신화됩니다.
+        </div>
+        <div id="recentMeetingFeedback" class="mb-2 hidden rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-xs leading-5 text-slate-300"></div>
+        <ul id="recentMeetings" class="space-y-1"></ul>
+      </div>
+
+      <div class="border-t border-slate-800 p-4">
+        <div class="mb-2 rounded-md bg-slate-800/70 px-3 py-2 text-xs leading-5 text-slate-400">
+          AI 기능을 사용하려면 설정에서 Gemini API Key를 입력하세요.
+        </div>
+        <button id="openSettingsButton" class="flex w-full items-center gap-2 rounded-md p-2 text-sm text-slate-400 transition hover:bg-slate-800 hover:text-white">
+          <i data-lucide="settings" class="h-4 w-4"></i>
+          설정
+        </button>
+        <div class="mt-4 flex items-center gap-3 px-2">
+          <div id="profileInitial" class="flex h-8 w-8 items-center justify-center rounded-full bg-slate-700 text-sm font-bold text-white">LP</div>
+          <div class="min-w-0">
+            <div id="profileName" class="truncate text-sm font-semibold text-white">사용자</div>
+            <div id="profileDepartment" class="truncate text-xs text-slate-500">부서 미설정</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="flex min-w-0 flex-1 flex-col bg-white">
+      <header class="flex h-auto shrink-0 flex-col gap-3 border-b border-slate-200 bg-white px-4 py-3 md:h-16 md:flex-row md:items-center md:justify-between md:px-6">
+        <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2 md:gap-3">
+          <input id="headerManagerName" type="text" placeholder="운용사명" class="min-w-0 rounded px-2 py-1 text-lg font-extrabold text-slate-900 outline-none transition placeholder:text-slate-300 hover:bg-slate-50 focus:bg-slate-50 md:w-44">
+          <span class="hidden text-slate-300 md:inline">/</span>
+          <input id="headerFundName" type="text" placeholder="펀드명 / 대출명" class="min-w-0 rounded px-2 py-1 text-lg font-extrabold text-slate-900 outline-none transition placeholder:text-slate-300 hover:bg-slate-50 focus:bg-slate-50 md:w-72">
+          <span id="headerStatus" class="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-600">초안 작성 중</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="mobileSettingsButton" class="icon-button md:hidden" title="설정">
+            <i data-lucide="settings" class="h-5 w-5"></i>
+          </button>
+          <button id="saveButton" class="icon-button" title="저장">
+            <i data-lucide="save" class="h-5 w-5"></i>
+          </button>
+          <button id="exportButton" class="icon-button" title="Markdown 내보내기">
+            <i data-lucide="download" class="h-5 w-5"></i>
+          </button>
+          <button id="copyAllButton" class="icon-button" title="전체 복사">
+            <i data-lucide="copy" class="h-5 w-5"></i>
+          </button>
+        </div>
+      </header>
+
+      <div class="shrink-0 border-b border-slate-200 bg-slate-50/70 px-3 py-3 md:px-6">
+        <nav class="flex items-center justify-start gap-4 overflow-x-auto md:justify-center md:gap-8" aria-label="업무 단계">
+          <button class="phase-tab active" data-phase="prep"><span>1</span><strong>사전 준비</strong></button>
+          <button class="phase-tab" data-phase="live"><span>2</span><strong>미팅 노트</strong></button>
+          <button class="phase-tab" data-phase="report"><span>3</span><strong>최종 보고서</strong></button>
+        </nav>
+      </div>
+
+      <section id="workspace" class="min-h-0 flex-1 overflow-y-auto bg-slate-50/40">
+        <div id="phasePrep" class="mx-auto max-w-6xl p-4 md:p-8">
+          <div class="mb-6">
+            <h1 class="text-2xl font-extrabold text-slate-900">사전 준비</h1>
+            <p class="mt-1 text-sm text-slate-500">IM이 있으면 문서를 먼저 읽고, 세팅값은 보정값으로 반영합니다. IM이 없으면 아래 기본 세팅값으로 분석을 시작합니다.</p>
+          </div>
+
+          <div class="grid gap-6 xl:grid-cols-[1fr_420px]">
+            <div class="space-y-6">
+              <div class="brief-card">
+                <div class="mb-4 flex items-center justify-between gap-3">
+                  <h2 class="flex items-center gap-2 text-base font-extrabold text-slate-900">
+                    <i data-lucide="file-up" class="h-4 w-4 text-brand-600"></i>
+                    IM 파일
+                  </h2>
+                  <span id="fileModeBadge" class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-500">선택 사항</span>
+                </div>
+                <div id="dropZone" class="drop-zone flex cursor-pointer flex-col items-center justify-center rounded-lg p-8 text-center hover:bg-slate-50">
+                  <div class="mb-4 rounded-full bg-brand-50 p-3 text-brand-600">
+                    <i data-lucide="upload-cloud" class="h-8 w-8"></i>
+                  </div>
+                  <div id="dropZoneTitle" class="text-sm font-extrabold text-slate-900">IM, Teaser, 이미지 PDF를 업로드하세요</div>
+                  <div id="dropZoneDescription" class="mt-1 text-xs text-slate-500">PDF, TXT, PNG, JPG 지원. 큰 문서는 핵심 페이지 중심으로 읽습니다.</div>
+                  <div class="mt-4 flex flex-wrap items-center justify-center gap-2">
+                    <button type="button" class="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-700 shadow-sm hover:bg-slate-50">파일 선택</button>
+                    <button id="removeFileButton" type="button" class="hidden rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm font-bold text-red-700 hover:bg-red-100">파일 제거</button>
+                  </div>
+                  <input id="fileInput" class="hidden" type="file" accept=".pdf,.txt,.png,.jpg,.jpeg,application/pdf,text/plain,image/png,image/jpeg">
+                </div>
+
+                <input id="pageReadMode" type="hidden" value="auto">
+                <input id="customPages" type="hidden" value="">
+
+                <div id="processingLog" class="mt-4 hidden rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-600"></div>
+              </div>
+
+              <div id="briefOutput" class="space-y-4"></div>
+            </div>
+
+            <aside class="space-y-6">
+              <div class="brief-card">
+                <h2 class="mb-4 flex items-center gap-2 text-base font-extrabold text-slate-900">
+                  <i data-lucide="sliders-horizontal" class="h-4 w-4 text-brand-600"></i>
+                  세팅값
+                </h2>
+                <div class="grid gap-4">
+                  <label class="field-label">운용사명
+                    <input id="managerName" class="field-control" type="text" placeholder="예: KKR">
+                  </label>
+                  <label class="field-label">펀드명 / 대출명
+                    <input id="fundName" class="field-control" type="text" placeholder="예: Asia Fund VI, 오산세교 PF 대출">
+                  </label>
+                  <div class="grid grid-cols-2 gap-3">
+                    <label class="field-label">GP측 참가자
+                      <input id="gpParticipants" class="field-control" type="text" placeholder="예: PF 담당자, IR 담당자">
+                    </label>
+                    <label class="field-label">당사 참가자
+                      <input id="lpParticipants" class="field-control" type="text" placeholder="예: 김심사역, 박팀장">
+                    </label>
+                  </div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <label class="field-label">미팅일
+                      <input id="meetingDate" class="field-control" type="date">
+                    </label>
+                  </div>
+                  <label class="field-label">실제 투자지역
+                    <select id="locationType" class="field-control">
+                      <option value="">선택</option>
+                      <option>국내</option>
+                      <option>해외</option>
+                    </select>
+                  </label>
+                  <label class="field-label">자산군
+                    <select id="assetClass" class="field-control">
+                      <option value="">선택</option>
+                      <option>인프라</option>
+                      <option>부동산</option>
+                      <option>사모투자(PE)</option>
+                      <option>사모투자(PD)</option>
+                      <option>상품금융</option>
+                    </select>
+                  </label>
+                  <div class="grid grid-cols-2 gap-3">
+                    <label class="field-label">전략
+                      <select id="strategy" class="field-control" disabled>
+                        <option value="">자산군을 먼저 선택</option>
+                      </select>
+                    </label>
+                    <label class="field-label">섹터
+                      <select id="sector" class="field-control" disabled>
+                        <option value="">자산군을 먼저 선택</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label class="field-label">Equity / Debt
+                    <select id="capitalType" class="field-control">
+                      <option value="">선택</option>
+                      <option>Equity</option>
+                      <option>Debt</option>
+                      <option>Hybrid / Mezzanine</option>
+                    </select>
+                  </label>
+                  <label class="field-label">상세 투자구조
+                    <select id="investmentStructure" class="field-control" disabled>
+                      <option value="">Equity / Debt를 먼저 선택</option>
+                    </select>
+                  </label>
+                  <label class="field-label">딜 / 자산 메모
+                    <textarea id="keyConcerns" class="field-control min-h-28" placeholder="예: 서울 성북구 HUG보증부 민간임대아파트 PF. 여러 차례 공사 중단 사례가 있으나 HUG 보증으로 원리금 안정성이 높아 보임."></textarea>
+                  </label>
+                </div>
+
+                <div class="mt-5 flex justify-end gap-2">
+                  <button id="savePrepButton" class="small-action">
+                    <i data-lucide="save" class="h-4 w-4"></i>
+                    저장
+                  </button>
+                  <button id="generateBriefButton" class="inline-flex items-center justify-center gap-2 rounded-md bg-brand-600 px-4 py-2 text-sm font-extrabold text-white shadow-sm transition hover:bg-brand-700">
+                    <i data-lucide="sparkles" class="h-4 w-4"></i>
+                    브리프 생성
+                  </button>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+
+        <div id="phaseLive" class="hidden h-full min-h-[720px]">
+          <div class="grid h-full grid-cols-1 md:grid-cols-[360px_1fr]">
+            <aside class="min-h-0 border-b border-slate-200 bg-slate-50 md:border-b-0 md:border-r">
+              <div class="flex items-center justify-between border-b border-slate-200 bg-white p-4">
+                <h2 class="flex items-center gap-2 text-sm font-extrabold text-slate-900">
+                  <i data-lucide="list-checks" class="h-4 w-4 text-brand-600"></i>
+                  질문 리스트
+                </h2>
+                <span id="questionCount" class="rounded bg-slate-100 px-2 py-1 text-xs font-bold text-slate-500">0개</span>
+              </div>
+              <div id="questionList" class="max-h-[320px] space-y-3 overflow-y-auto p-4 md:max-h-none"></div>
+            </aside>
+
+            <div class="min-w-0 bg-white">
+              <div class="flex flex-col gap-3 border-b border-slate-100 p-4 md:flex-row md:items-center md:justify-between">
+                <h2 class="flex items-center gap-2 text-sm font-extrabold text-slate-900">
+                  <i data-lucide="pen-tool" class="h-4 w-4 text-slate-600"></i>
+                  미팅 중 기록
+                </h2>
+                <div class="flex flex-wrap gap-2">
+                  <button id="addQuestionButton" class="small-action">
+                    <i data-lucide="plus" class="h-4 w-4"></i>
+                    질문 추가
+                  </button>
+                  <button id="timestampButton" class="small-action">
+                    <i data-lucide="clock" class="h-4 w-4"></i>
+                    타임스탬프
+                  </button>
+                </div>
+              </div>
+
+              <div class="grid gap-5 p-4 xl:grid-cols-[1fr_420px]">
+                <div id="selectedQuestionPanel" class="brief-card"></div>
+                <div class="space-y-5">
+                  <div class="brief-card">
+                    <h3>자유 메모</h3>
+                    <textarea id="meetingNotes" class="field-control min-h-52" placeholder="중요 발언, 맥락, 빠른 메모를 자유롭게 기록하세요."></textarea>
+                  </div>
+                  <div class="brief-card">
+                    <h3>Transcript</h3>
+                    <textarea id="transcript" class="field-control min-h-44" placeholder="녹취록이나 회의 전문이 있으면 붙여넣으세요."></textarea>
+                  </div>
+                  <div class="flex justify-end">
+                    <button id="generateReportButton" class="inline-flex items-center justify-center gap-2 rounded-md bg-brand-600 px-5 py-2.5 text-sm font-extrabold text-white shadow-sm transition hover:bg-brand-700">
+                      <i data-lucide="cpu" class="h-4 w-4"></i>
+                      최종 보고서 생성
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="phaseReport" class="hidden mx-auto max-w-5xl p-4 md:p-8">
+          <div class="mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h1 class="text-2xl font-extrabold text-slate-900">최종 보고서</h1>
+              <p class="mt-1 text-sm text-slate-500">사전 분석, 질문별 답변, 자유 메모, Transcript를 종합합니다.</p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <select id="reportTone" class="field-control mt-0 w-auto">
+                <option value="neutral">중립적 리뷰</option>
+                <option value="positive">긍정적 검토</option>
+                <option value="conservative">보수적 리스크 강조</option>
+              </select>
+              <button id="regenerateReportButton" class="small-action">
+                <i data-lucide="refresh-cw" class="h-4 w-4"></i>
+                재생성
+              </button>
+              <button id="copyReportButton" class="small-action primary-soft">
+                <i data-lucide="copy" class="h-4 w-4"></i>
+                복사
+              </button>
+              <button id="exportDocxButton" class="small-action primary-soft">
+                <i data-lucide="file-down" class="h-4 w-4"></i>
+                DOCX
+              </button>
+            </div>
+          </div>
+          <div id="reportOutput" class="prose-shell rounded-xl border border-slate-200 bg-white p-6 shadow-sm"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="settingsModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-900/50 p-4 opacity-0 backdrop-blur-sm transition-opacity">
+    <div id="settingsPanel" class="w-full max-w-xl scale-95 overflow-hidden rounded-xl bg-white shadow-2xl transition-transform">
+      <div class="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-6 py-4">
+        <h2 class="text-base font-extrabold text-slate-900">환경 설정</h2>
+        <button id="closeSettingsButton" class="icon-button" title="닫기">
+          <i data-lucide="x" class="h-5 w-5"></i>
+        </button>
+      </div>
+      <div class="space-y-4 p-6">
+        <div class="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-5 text-amber-900">
+          AI 기능을 사용하려면 먼저 Gemini API Key를 입력하고 저장하세요.
+        </div>
+        <div class="grid gap-4 md:grid-cols-2">
+          <label class="field-label">이름
+            <input id="settingsName" class="field-control" type="text" placeholder="예: 김심사역">
+          </label>
+          <label class="field-label">부서
+            <input id="settingsDepartment" class="field-control" type="text" placeholder="예: 대체투자본부">
+          </label>
+        </div>
+        <label class="field-label">Gemini API Key
+          <input id="settingsApiKey" class="field-control" type="password" autocomplete="new-password" placeholder="새 API Key를 붙여넣으면 즉시 교체됩니다">
+        </label>
+        <div id="settingsKeyHint" class="text-xs leading-5 text-slate-500"></div>
+        <label class="field-label">Gemini 모델
+          <select id="settingsModel" class="field-control">
+            <option value="gemini-2.5-flash">gemini-2.5-flash · 권장 기본값</option>
+            <option value="gemini-3.5-flash">gemini-3.5-flash · 최신 안정 Flash</option>
+            <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite · 최신 경량/저비용</option>
+            <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview · 고난도 추론 Preview</option>
+            <option value="gemini-3-flash-preview">gemini-3-flash-preview · Gemini 3 Preview</option>
+            <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite · 저비용 대량 처리</option>
+            <option value="gemini-2.5-pro">gemini-2.5-pro · 복잡한 분석</option>
+          </select>
+        </label>
+        <div class="rounded-lg border border-blue-100 bg-blue-50 p-4 text-sm leading-6 text-blue-900">
+          API Key는 저장소, localStorage, sessionStorage에 저장하지 않습니다. 새로고침하거나 탭을 닫으면 다시 입력해야 합니다.
+        </div>
+        <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
+          <label class="flex items-start gap-3 text-sm font-bold text-slate-800">
+            <input id="settingsStorageEnabled" type="checkbox" class="mt-1 h-4 w-4 rounded border-slate-300 text-brand-600" checked>
+            <span>
+              미팅 데이터 localStorage 저장
+              <span class="mt-1 block text-xs font-medium leading-5 text-slate-500">현재 미팅, 최근 미팅, 답변 기록, 생성 결과를 브라우저에 저장합니다. API Key는 저장하지 않으며, 이름/부서/모델은 편의를 위해 저장합니다.</span>
+            </span>
+          </label>
+          <div id="storageStatus" class="mt-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs leading-5 text-slate-600"></div>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <button id="exportAndClearStorageButton" type="button" class="rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 shadow-sm hover:bg-slate-100">백업 후 저장소 비우기</button>
+            <button id="clearLocalStorageButton" type="button" class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-700 hover:bg-red-100">전체 삭제</button>
+          </div>
+        </div>
+        <div id="providerStatus" class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600"></div>
+      </div>
+      <div class="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-6 py-4">
+        <button id="testSettingsButton" class="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-700 shadow-sm hover:bg-slate-100">저장 후 연결 테스트</button>
+        <button id="cancelSettingsButton" class="rounded-md px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-200">취소</button>
+        <button id="saveSettingsButton" class="rounded-md bg-slate-900 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-slate-800">저장</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="globalLoader" class="fixed inset-0 z-[100] hidden flex-col items-center justify-center bg-white/80 p-4 text-center backdrop-blur-sm">
+    <i data-lucide="loader-2" class="mb-4 h-10 w-10 animate-spin text-brand-600"></i>
+    <p id="loaderTitle" class="text-lg font-extrabold text-slate-900">AI가 분석하고 있습니다.</p>
+    <p id="loaderMessage" class="mt-1 max-w-xl text-sm text-slate-500">문서와 세팅값을 종합하는 중입니다.</p>
+  </div>
+
+  <div id="toast" class="fixed bottom-5 left-1/2 z-[120] hidden -translate-x-1/2 rounded-lg bg-slate-900 px-4 py-3 text-sm font-bold text-white shadow-lg"></div>
+
+  <script src="./app.js?v=20260607-market-source-dates"></script>
+</body>
+</html>

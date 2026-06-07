@@ -1,0 +1,3735 @@
+const STORAGE_KEY = "meetingCopilot.static.v1";
+const LIBRARY_KEY = "meetingCopilot.library.v1";
+const PROFILE_KEY = "meetingCopilot.profile.v1";
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+const DEFAULT_MODEL = "gemini-2.5-flash";
+const FALLBACK_MODEL = "gemini-2.5-flash-lite";
+const LIMIT_MESSAGE = "API Key가 없거나 한도가 제한되었습니다.";
+const PDFJS_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs";
+const PDFJS_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs";
+const DOCX_FINAL_TEMPLATE_URL = "STYLE_WANTED/DOCX_FINAL_WANTED.docx";
+
+const ASSET_OPTIONS = {
+  "인프라": {
+    strategies: ["Core", "Core+", "Value-Add", "Opportunistic", "Development / Greenfield"],
+    sectors: ["신재생에너지", "디지털 인프라 / 데이터센터", "교통 / 물류 인프라", "유틸리티 / 환경", "사회기반시설 PPP", "기타 인프라"]
+  },
+  "부동산": {
+    strategies: ["Core", "Core+", "Value-Add", "Opportunistic", "Development / PF", "NPL / Distressed"],
+    sectors: ["오피스", "물류센터", "주거 / 멀티패밀리", "리테일", "호텔 / 호스피탈리티", "데이터센터", "라이프사이언스", "기타 부동산"]
+  },
+  "사모투자(PE)": {
+    strategies: ["Buyout", "Growth Capital", "Venture Capital", "Secondary", "Co-investment", "Special Situations"],
+    sectors: ["테크 / 소프트웨어", "헬스케어 / 바이오", "소비재 / 이커머스", "산업재", "금융서비스", "에너지전환", "기타 PE"],
+    fixedCapitalType: "Equity"
+  },
+  "사모투자(PD)": {
+    strategies: ["Direct Lending", "Mezzanine", "Distressed Credit", "Special Situations", "Asset-backed Finance", "Structured Credit"],
+    sectors: ["기업 인수금융", "부동산 담보대출", "인프라 대출", "NAV Financing", "운전자금 / Growth Debt", "기타 PD"],
+    fixedCapitalType: "Debt"
+  },
+  "상품금융": {
+    strategies: ["Balloon 있음", "Balloon 없음"],
+    sectors: ["항공기", "선박", "기타"]
+  }
+};
+
+const CAPITAL_OPTIONS = {
+  Equity: ["Common Equity", "Preferred Equity", "RCPS", "CPS", "Co-investment Equity", "LP Commitment"],
+  Debt: ["Senior Debt", "Subordinated Debt", "Unitranche", "Bridge Loan", "Project Finance Loan", "Asset-backed Loan"],
+  "Hybrid / Mezzanine": ["Mezzanine", "Convertible Bond", "Bond with Warrant", "Preferred Equity + Debt", "Structured Equity"]
+};
+
+const runtimeConfig = {
+  apiKey: "",
+  model: DEFAULT_MODEL
+};
+
+const emptyState = () => ({
+  meetingId: null,
+  activePhase: "prep",
+  selectedQuestionIndex: 0,
+  selectedFileName: "",
+  selectedFileMeta: null,
+  imProcessingResult: null,
+  marketContext: null,
+  preMeetingBrief: null,
+  postMeetingMemo: null,
+  meeting: {
+    managerName: "",
+    fundName: "",
+    gpParticipants: "",
+    lpParticipants: "",
+    contactName: "",
+    meetingDate: "",
+    locationType: "",
+    assetClass: "",
+    strategy: "",
+    sector: "",
+    capitalType: "",
+    investmentStructure: "",
+    keyConcerns: ""
+  },
+  documentSettings: {
+    pageReadMode: "auto",
+    customPages: ""
+  },
+  questionRecords: [],
+  meetingNotes: "",
+  transcript: "",
+  reportTone: "neutral",
+  lastSavedAt: null
+});
+
+let state = emptyState();
+let profile = {
+  name: "사용자",
+  department: "부서 미설정",
+  model: DEFAULT_MODEL,
+  meetingStorageEnabled: true
+};
+let selectedFile = null;
+let pdfjsLibPromise = null;
+let isBusy = false;
+let lastGeminiModelUsed = DEFAULT_MODEL;
+let lastGeminiDiagnostic = null;
+let libraryUpdateTimer = null;
+let localMeetingStorageEnabled = true;
+
+const $ = (id) => document.getElementById(id);
+
+document.addEventListener("DOMContentLoaded", init);
+
+function init() {
+  loadProfile();
+  loadState();
+  bindEvents();
+  applyStateToFields();
+  renderAll();
+  refreshIcons();
+}
+
+function bindEvents() {
+  document.querySelectorAll("[data-phase]").forEach((button) => {
+    button.addEventListener("click", () => switchPhase(button.dataset.phase));
+  });
+
+  $("newMeetingButton").addEventListener("click", resetMeeting);
+  $("openSettingsButton").addEventListener("click", openSettings);
+  $("mobileSettingsButton").addEventListener("click", openSettings);
+  $("closeSettingsButton").addEventListener("click", closeSettings);
+  $("cancelSettingsButton").addEventListener("click", closeSettings);
+  $("saveSettingsButton").addEventListener("click", saveSettings);
+  $("testSettingsButton").addEventListener("click", testSettingsConnection);
+  $("clearLocalStorageButton").addEventListener("click", clearLocalMeetingStorage);
+  $("exportAndClearStorageButton").addEventListener("click", exportMeetingStorageAndClear);
+
+  $("saveButton").addEventListener("click", () => {
+    saveCurrentMeeting("최근 미팅에 저장했습니다.");
+  });
+  $("savePrepButton").addEventListener("click", () => {
+    saveCurrentMeeting("최근 미팅에 저장했습니다.");
+  });
+  $("exportButton").addEventListener("click", exportMarkdown);
+  $("copyAllButton").addEventListener("click", () => copyText(buildFullMarkdown(), "전체 내용을 복사했습니다."));
+  $("copyReportButton").addEventListener("click", () => copyText(buildReportMarkdown(), "보고서를 복사했습니다."));
+  $("exportDocxButton").addEventListener("click", exportReportDocx);
+  $("regenerateReportButton").addEventListener("click", generateReport);
+  $("generateBriefButton").addEventListener("click", generateBrief);
+  $("generateReportButton").addEventListener("click", generateReport);
+  $("addQuestionButton").addEventListener("click", addQuestion);
+  $("timestampButton").addEventListener("click", insertTimestamp);
+
+  const dropZone = $("dropZone");
+  const fileInput = $("fileInput");
+  dropZone.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", (event) => handleFiles(event.target.files));
+  $("removeFileButton").addEventListener("click", removeSelectedFile);
+  ["dragenter", "dragover", "dragleave", "drop"].forEach((eventName) => {
+    dropZone.addEventListener(eventName, preventDefaults);
+  });
+  ["dragenter", "dragover"].forEach((eventName) => {
+    dropZone.addEventListener(eventName, () => dropZone.classList.add("dragover"));
+  });
+  ["dragleave", "drop"].forEach((eventName) => {
+    dropZone.addEventListener(eventName, () => dropZone.classList.remove("dragover"));
+  });
+  dropZone.addEventListener("drop", (event) => handleFiles(event.dataTransfer.files));
+
+  [
+    "managerName",
+    "fundName",
+    "gpParticipants",
+    "lpParticipants",
+    "meetingDate",
+    "locationType",
+    "assetClass",
+    "strategy",
+    "sector",
+    "capitalType",
+    "investmentStructure",
+    "keyConcerns",
+    "headerManagerName",
+    "headerFundName",
+    "pageReadMode",
+    "customPages",
+    "meetingNotes",
+    "transcript",
+    "reportTone"
+  ].forEach((id) => {
+    $(id).addEventListener("input", handleFieldInput);
+    $(id).addEventListener("change", handleFieldInput);
+  });
+
+  $("assetClass").addEventListener("change", () => {
+    populateAssetDependentSelects();
+    syncFieldsToState();
+    saveState();
+    scheduleExistingLibraryUpdate();
+  });
+  $("capitalType").addEventListener("change", () => {
+    populateCapitalStructureSelect();
+    syncFieldsToState();
+    saveState();
+    scheduleExistingLibraryUpdate();
+  });
+}
+
+function preventDefaults(event) {
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function handleFiles(files) {
+  if (!files || !files.length) return;
+  selectedFile = files[0];
+  state.selectedFileName = selectedFile.name;
+  state.selectedFileMeta = {
+    name: selectedFile.name,
+    size: selectedFile.size,
+    type: selectedFile.type || guessMimeType(selectedFile.name)
+  };
+  state.imProcessingResult = null;
+  state.preMeetingBrief = null;
+  state.marketContext = null;
+  renderFileState();
+  saveState();
+  scheduleExistingLibraryUpdate();
+}
+
+function removeSelectedFile(event) {
+  event?.preventDefault();
+  event?.stopPropagation();
+  selectedFile = null;
+  state.selectedFileName = "";
+  state.selectedFileMeta = null;
+  state.imProcessingResult = null;
+  state.marketContext = null;
+  state.preMeetingBrief = null;
+  state.postMeetingMemo = null;
+  state.questionRecords = [];
+  state.selectedQuestionIndex = 0;
+  const fileInput = $("fileInput");
+  if (fileInput) fileInput.value = "";
+  renderAll();
+  saveState();
+  scheduleExistingLibraryUpdate();
+  toast("선택한 IM 파일을 제거했습니다.");
+}
+
+function handleFieldInput(event) {
+  const { id, value } = event.target;
+  if (id === "headerManagerName") $("managerName").value = value;
+  if (id === "headerFundName") $("fundName").value = value;
+  if (id === "managerName") $("headerManagerName").value = value;
+  if (id === "fundName") $("headerFundName").value = value;
+  syncFieldsToState();
+  saveState();
+  scheduleExistingLibraryUpdate();
+  renderStatus();
+}
+
+function populateAssetDependentSelects(preferredStrategy = "", preferredSector = "") {
+  const assetClass = $("assetClass").value;
+  const config = ASSET_OPTIONS[assetClass];
+  fillSelect($("strategy"), config?.strategies || [], "자산군을 먼저 선택", preferredStrategy);
+  fillSelect($("sector"), config?.sectors || [], "자산군을 먼저 선택", preferredSector);
+  applyFixedCapitalTypeForAsset(config);
+}
+
+function populateCapitalStructureSelect(preferredStructure = "") {
+  const capitalType = $("capitalType").value;
+  const options = CAPITAL_OPTIONS[capitalType] || [];
+  fillSelect($("investmentStructure"), options, "Equity / Debt를 먼저 선택", preferredStructure);
+}
+
+function fillSelect(select, options, emptyLabel, preferredValue = "") {
+  select.innerHTML = "";
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = emptyLabel;
+  select.appendChild(empty);
+  options.forEach((value) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    select.appendChild(option);
+  });
+  select.disabled = options.length === 0;
+  if (preferredValue && options.includes(preferredValue)) {
+    select.value = preferredValue;
+  } else {
+    select.value = "";
+  }
+}
+
+function applyFixedCapitalTypeForAsset(config) {
+  const capitalSelect = $("capitalType");
+  if (config?.fixedCapitalType) {
+    capitalSelect.value = config.fixedCapitalType;
+    capitalSelect.disabled = true;
+    capitalSelect.title = "사모투자 PE/PD는 자산군에서 Equity/Debt 성격이 이미 정해집니다.";
+    populateCapitalStructureSelect();
+    return;
+  }
+  capitalSelect.disabled = false;
+  capitalSelect.title = "";
+  populateCapitalStructureSelect(state.meeting.investmentStructure || "");
+}
+
+function inferCapitalType(value = "") {
+  const normalized = value.toLowerCase();
+  if (!normalized) return "";
+  if (["senior", "debt", "loan", "unitranche", "bridge"].some((word) => normalized.includes(word))) return "Debt";
+  if (["mezzanine", "convertible", "hybrid", "cb", "bw"].some((word) => normalized.includes(word))) return "Hybrid / Mezzanine";
+  if (["equity", "rcps", "cps", "preferred", "common"].some((word) => normalized.includes(word))) return "Equity";
+  return "";
+}
+
+function syncFieldsToState() {
+  state.meeting = {
+    managerName: $("managerName").value.trim(),
+    fundName: $("fundName").value.trim(),
+    gpParticipants: $("gpParticipants").value.trim(),
+    lpParticipants: $("lpParticipants").value.trim(),
+    contactName: $("gpParticipants").value.trim(),
+    meetingDate: $("meetingDate").value,
+    locationType: $("locationType").value,
+    assetClass: $("assetClass").value,
+    strategy: $("strategy").value,
+    sector: $("sector").value,
+    capitalType: $("capitalType").value,
+    investmentStructure: $("investmentStructure").value,
+    keyConcerns: $("keyConcerns").value.trim()
+  };
+  state.documentSettings = {
+    pageReadMode: $("pageReadMode").value,
+    customPages: $("customPages").value.trim()
+  };
+  state.meetingNotes = $("meetingNotes").value;
+  state.transcript = $("transcript").value;
+  state.reportTone = $("reportTone").value;
+}
+
+function applyStateToFields() {
+  $("managerName").value = state.meeting.managerName || "";
+  $("fundName").value = state.meeting.fundName || "";
+  $("headerManagerName").value = state.meeting.managerName || "";
+  $("headerFundName").value = state.meeting.fundName || "";
+  $("gpParticipants").value = state.meeting.gpParticipants || state.meeting.contactName || "";
+  $("lpParticipants").value = state.meeting.lpParticipants || "";
+  $("meetingDate").value = state.meeting.meetingDate || "";
+  $("locationType").value = state.meeting.locationType || "";
+  $("assetClass").value = state.meeting.assetClass || "";
+  populateAssetDependentSelects(state.meeting.strategy || state.meeting.sectorStrategy || "", state.meeting.sector || "");
+  if (!ASSET_OPTIONS[$("assetClass").value]?.fixedCapitalType) {
+    $("capitalType").value = state.meeting.capitalType || inferCapitalType(state.meeting.investmentStructure || "");
+    populateCapitalStructureSelect(state.meeting.investmentStructure || "");
+    $("investmentStructure").value = state.meeting.investmentStructure || "";
+  }
+  $("keyConcerns").value = state.meeting.keyConcerns || "";
+  $("pageReadMode").value = "auto";
+  $("customPages").value = "";
+  $("meetingNotes").value = state.meetingNotes || "";
+  $("transcript").value = state.transcript || "";
+  $("reportTone").value = state.reportTone || "neutral";
+}
+
+function loadProfile() {
+  try {
+    profile = { ...profile, ...JSON.parse(localStorage.getItem(PROFILE_KEY) || "{}") };
+  } catch {
+    profile = { name: "사용자", department: "부서 미설정", model: DEFAULT_MODEL, meetingStorageEnabled: true };
+  }
+  runtimeConfig.model = profile.model || DEFAULT_MODEL;
+  localMeetingStorageEnabled = profile.meetingStorageEnabled !== false;
+}
+
+function saveProfile() {
+  const safeProfile = {
+    name: profile.name || "사용자",
+    department: profile.department || "부서 미설정",
+    model: profile.model || DEFAULT_MODEL,
+    meetingStorageEnabled: localMeetingStorageEnabled
+  };
+  localStorage.setItem(PROFILE_KEY, JSON.stringify(safeProfile));
+}
+
+function loadState() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+    if (saved) state = mergeSavedState(saved);
+  } catch {
+    state = emptyState();
+  }
+}
+
+function saveState() {
+  syncFieldsSilently();
+  state.lastSavedAt = new Date().toISOString();
+  if (!localMeetingStorageEnabled) return;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizeStateForStorage(state)));
+}
+
+function syncFieldsSilently() {
+  if (!$("managerName")) return;
+  state.meeting.managerName = $("managerName").value.trim();
+  state.meeting.fundName = $("fundName").value.trim();
+  state.meeting.gpParticipants = $("gpParticipants").value.trim();
+  state.meeting.lpParticipants = $("lpParticipants").value.trim();
+  state.meeting.contactName = $("gpParticipants").value.trim();
+  state.meeting.meetingDate = $("meetingDate").value;
+  state.meeting.locationType = $("locationType").value;
+  state.meeting.assetClass = $("assetClass").value;
+  state.meeting.strategy = $("strategy").value;
+  state.meeting.sector = $("sector").value;
+  state.meeting.capitalType = $("capitalType").value;
+  state.meeting.investmentStructure = $("investmentStructure").value;
+  state.meeting.keyConcerns = $("keyConcerns").value.trim();
+  state.documentSettings.pageReadMode = "auto";
+  state.documentSettings.customPages = "";
+  state.meetingNotes = $("meetingNotes").value;
+  state.transcript = $("transcript").value;
+  state.reportTone = $("reportTone").value;
+}
+
+function openSettings() {
+  $("settingsName").value = profile.name || "";
+  $("settingsDepartment").value = profile.department || "";
+  $("settingsModel").value = runtimeConfig.model || DEFAULT_MODEL;
+  $("settingsApiKey").value = "";
+  $("settingsApiKey").placeholder = runtimeConfig.apiKey ? "새 API Key를 붙여넣으면 현재 키가 교체됩니다" : "Gemini API Key를 붙여넣으세요";
+  $("settingsStorageEnabled").checked = localMeetingStorageEnabled;
+  renderSettingsKeyHint();
+  renderStorageSettingsStatus();
+  renderProviderStatus();
+  $("settingsModal").classList.remove("hidden");
+  $("settingsModal").classList.add("flex");
+  setTimeout(() => {
+    $("settingsModal").classList.remove("opacity-0");
+    $("settingsPanel").classList.remove("scale-95");
+  }, 10);
+}
+
+function closeSettings() {
+  $("settingsModal").classList.add("opacity-0");
+  $("settingsPanel").classList.add("scale-95");
+  setTimeout(() => {
+    $("settingsModal").classList.add("hidden");
+    $("settingsModal").classList.remove("flex");
+  }, 180);
+}
+
+function saveSettings() {
+  applySettingsFromModal();
+  closeSettings();
+  toast(runtimeConfig.apiKey ? `${runtimeConfig.model} 모델로 Gemini 설정을 현재 탭에 적용했습니다. ${keyFingerprint(runtimeConfig.apiKey)}` : "설정을 현재 탭에 적용했습니다. AI 실행 전 API Key를 입력해야 합니다.");
+}
+
+function applySettingsFromModal() {
+  profile.name = $("settingsName").value.trim() || "사용자";
+  profile.department = $("settingsDepartment").value.trim() || "부서 미설정";
+  profile.model = $("settingsModel").value.trim() || DEFAULT_MODEL;
+  runtimeConfig.model = profile.model;
+  localMeetingStorageEnabled = $("settingsStorageEnabled").checked;
+  const nextKey = $("settingsApiKey").value.trim();
+  if (nextKey) {
+    runtimeConfig.apiKey = nextKey;
+    $("settingsApiKey").value = "";
+    $("settingsApiKey").placeholder = "새 API Key를 붙여넣으면 현재 키가 교체됩니다";
+  }
+  saveProfile();
+  renderProfile();
+  renderSettingsKeyHint();
+  renderStorageSettingsStatus();
+  renderProviderStatus();
+}
+
+async function testSettingsConnection() {
+  const button = $("testSettingsButton");
+  try {
+    applySettingsFromModal();
+    if (!runtimeConfig.apiKey) throw new Error("API Key가 아직 적용되지 않았습니다. 새 키를 붙여넣고 다시 테스트하세요.");
+    button.disabled = true;
+    button.textContent = "모델 확인 중...";
+    const diagnostic = await runGeminiConnectionDiagnostics(runtimeConfig.model || DEFAULT_MODEL);
+    lastGeminiDiagnostic = diagnostic;
+    toast(`연결 테스트 성공: ${diagnostic.model} / ${keyFingerprint(runtimeConfig.apiKey)}`);
+  } catch (error) {
+    lastGeminiDiagnostic = {
+      ok: false,
+      model: runtimeConfig.model || DEFAULT_MODEL,
+      checkedAt: new Date().toISOString(),
+      keyFingerprint: keyFingerprint(runtimeConfig.apiKey),
+      error: getGeminiErrorInfoFromError(error)
+    };
+    showError(error);
+  } finally {
+    button.disabled = false;
+    button.textContent = "저장 후 연결 테스트";
+    renderSettingsKeyHint();
+    renderProviderStatus();
+  }
+}
+
+async function runGeminiConnectionDiagnostics(model) {
+  const checkedAt = new Date().toISOString();
+  const models = await fetchGeminiModelList();
+  const normalizedModel = normalizeGeminiModelName(model);
+  const availableModel = models.find((item) => normalizeGeminiModelName(item.name) === normalizedModel);
+  if (!availableModel) {
+    throw createGeminiApiError(
+      `${model} 모델이 이 API Key/프로젝트에서 조회되지 않습니다. 설정에서 다른 모델을 선택하거나 AI Studio의 모델 권한을 확인하세요.`,
+      {
+        model,
+        status: 404,
+        statusText: "MODEL_NOT_LISTED",
+        rawMessage: "The selected model was not returned by models.list.",
+        reason: "model_not_listed"
+      }
+    );
+  }
+  if (Array.isArray(availableModel.supportedActions) && !availableModel.supportedActions.includes("generateContent")) {
+    throw createGeminiApiError(
+      `${model} 모델은 현재 generateContent 호출을 지원하지 않습니다. 텍스트 생성 가능한 Gemini 모델을 선택하세요.`,
+      {
+        model,
+        status: 400,
+        statusText: "UNSUPPORTED_ACTION",
+        rawMessage: "The selected model does not support generateContent.",
+        reason: "unsupported_action"
+      }
+    );
+  }
+  const text = await callGeminiModel(model, {
+    contents: [{ role: "user", parts: [{ text: "Reply with only OK." }] }],
+    generationConfig: { temperature: 0, maxOutputTokens: 8 }
+  });
+  return {
+    ok: true,
+    model,
+    checkedAt,
+    keyFingerprint: keyFingerprint(runtimeConfig.apiKey),
+    modelCount: models.length,
+    responsePreview: text.slice(0, 40)
+  };
+}
+
+async function fetchGeminiModelList() {
+  const response = await fetch(`${GEMINI_API_BASE}?pageSize=1000`, {
+    method: "GET",
+    headers: { "x-goog-api-key": runtimeConfig.apiKey }
+  });
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    const info = getGeminiErrorInfo(errorText, response.status, "models.list");
+    throw createGeminiApiError(info.message, info);
+  }
+  const data = await response.json();
+  return (data.models || []).filter((model) => {
+    const actions = model.supportedActions || model.supportedGenerationMethods || model.supported_actions || model.supported_generation_methods || [];
+    model.supportedActions = actions;
+    return actions.includes("generateContent");
+  });
+}
+
+function normalizeGeminiModelName(name) {
+  return String(name || "").replace(/^models\//, "").trim();
+}
+
+function renderAll() {
+  renderProfile();
+  renderFileState();
+  renderBrief();
+  renderQuestions();
+  renderSelectedQuestion();
+  renderReport();
+  renderRecentMeetings();
+  renderProviderStatus();
+  renderStatus();
+  switchPhase(state.activePhase || "prep", false);
+}
+
+function renderProfile() {
+  $("profileName").textContent = profile.name || "사용자";
+  $("profileDepartment").textContent = profile.department || "부서 미설정";
+  $("profileInitial").textContent = makeInitial(profile.name);
+}
+
+function makeInitial(name) {
+  const cleaned = (name || "LP").trim();
+  return cleaned.slice(0, 2).toUpperCase();
+}
+
+function renderProviderStatus() {
+  if (!$("providerStatus")) return;
+  const base = runtimeConfig.apiKey
+    ? `Gemini API Key가 현재 탭 메모리에만 적용되어 있습니다. 현재 모델: ${runtimeConfig.model || DEFAULT_MODEL} / 적용 키: ${keyFingerprint(runtimeConfig.apiKey)}`
+    : `Gemini API Key가 없습니다. AI 버튼을 실행하면 "${LIMIT_MESSAGE}" 메시지가 표시됩니다.`;
+  const diagnostic = formatGeminiDiagnostic(lastGeminiDiagnostic);
+  $("providerStatus").textContent = diagnostic ? `${base}\n${diagnostic}` : base;
+}
+
+function formatGeminiDiagnostic(diagnostic) {
+  if (!diagnostic) return "";
+  const checkedAt = diagnostic.checkedAt ? formatDateTime(diagnostic.checkedAt) : "";
+  if (diagnostic.ok) {
+    return `최근 연결 테스트: 성공 · ${diagnostic.model} · ${checkedAt}`;
+  }
+  const error = diagnostic.error || {};
+  const code = [error.status, error.statusText || error.reason].filter(Boolean).join(" ");
+  return `최근 연결 테스트: 실패 · ${diagnostic.model}${code ? ` · ${code}` : ""} · ${error.message || error.rawMessage || LIMIT_MESSAGE}`;
+}
+
+function renderSettingsKeyHint() {
+  const hint = $("settingsKeyHint");
+  if (!hint) return;
+  hint.textContent = runtimeConfig.apiKey
+    ? `현재 탭에 적용된 키: ${keyFingerprint(runtimeConfig.apiKey)}. 새 키를 입력하고 저장하면 즉시 교체됩니다.`
+    : "현재 적용된 API Key가 없습니다.";
+}
+
+function renderStorageSettingsStatus() {
+  const box = $("storageStatus");
+  if (!box) return;
+  const recentCount = getLibrary().length;
+  const hasCurrent = Boolean(localStorage.getItem(STORAGE_KEY));
+  box.textContent = localMeetingStorageEnabled
+    ? `로컬 저장 켜짐: 현재 미팅${hasCurrent ? " 저장됨" : " 미저장"} / 최근 미팅 ${recentCount}개. API Key는 저장하지 않습니다. 이름/부서/모델은 편의를 위해 저장됩니다.`
+    : "로컬 저장 꺼짐: 현재 탭에서 작업은 가능하지만 브라우저를 닫으면 미팅 데이터가 남지 않습니다. 이름/부서/모델은 유지됩니다.";
+}
+
+function keyFingerprint(key) {
+  if (!key) return "키 없음";
+  const trimmed = String(key).trim();
+  const tail = trimmed.slice(-4);
+  return `•••• ${tail}`;
+}
+
+function renderFileState() {
+  const removeButton = $("removeFileButton");
+  if (state.selectedFileName) {
+    $("dropZoneTitle").textContent = state.selectedFileName;
+    $("dropZoneDescription").textContent = selectedFile
+      ? `선택 완료: ${formatBytes(selectedFile.size)}`
+      : "이전 세션의 파일명만 남아 있습니다. 다시 분석하려면 파일을 다시 선택하세요.";
+    $("fileModeBadge").textContent = "IM 있음";
+    $("fileModeBadge").className = "rounded-full bg-brand-100 px-2.5 py-1 text-xs font-bold text-brand-700";
+    removeButton?.classList.remove("hidden");
+  } else {
+    $("dropZoneTitle").textContent = "IM, Teaser, 이미지 PDF를 업로드하세요";
+    $("dropZoneDescription").textContent = "PDF, TXT, PNG, JPG 지원. 큰 문서는 핵심 페이지 중심으로 읽습니다.";
+    $("fileModeBadge").textContent = "선택 사항";
+    $("fileModeBadge").className = "rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-500";
+    removeButton?.classList.add("hidden");
+  }
+  renderProcessingLog();
+}
+
+function renderProcessingLog() {
+  const box = $("processingLog");
+  if (!state.imProcessingResult) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  const result = state.imProcessingResult;
+  const pages = result.selectedPageNumbers?.length ? `선택 페이지: ${result.selectedPageNumbers.join(", ")}` : "선택 페이지 없음";
+  box.classList.remove("hidden");
+  box.innerHTML = `
+    <div class="font-extrabold text-slate-900">문서 처리 결과</div>
+    <div class="mt-2 space-y-1 text-sm">
+      <div>처리 방식: ${escapeHtml(result.analysisMode || "standard")}</div>
+      <div>${escapeHtml(pages)}</div>
+      <div>읽은 텍스트: ${formatNumber(result.textCharCount || 0)}자</div>
+      ${result.warning ? `<div class="text-amber-700">${escapeHtml(result.warning)}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderStatus() {
+  const badge = $("headerStatus");
+  if (state.postMeetingMemo) {
+    setBadge(badge, "보고서 작성 완료", "emerald");
+  } else if (state.preMeetingBrief) {
+    setBadge(badge, "브리프 준비 완료", "brand");
+  } else if (state.selectedFileName || state.meeting.managerName || state.meeting.fundName) {
+    setBadge(badge, "초안 작성 중", "slate");
+  } else {
+    setBadge(badge, "새 미팅", "slate");
+  }
+}
+
+function setBadge(element, text, tone) {
+  const classes = {
+    emerald: "inline-flex items-center rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-bold text-emerald-700",
+    brand: "inline-flex items-center rounded-full bg-brand-100 px-2.5 py-1 text-xs font-bold text-brand-700",
+    slate: "inline-flex items-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-600"
+  };
+  element.className = classes[tone] || classes.slate;
+  element.textContent = text;
+}
+
+function switchPhase(phase, persist = true) {
+  state.activePhase = phase;
+  ["prep", "live", "report"].forEach((name) => {
+    document.querySelector(`[data-phase="${name}"]`).classList.toggle("active", name === phase);
+    $(`phase${capitalize(name)}`).classList.toggle("hidden", name !== phase);
+  });
+  if (persist) saveState();
+  refreshIcons();
+}
+
+async function generateBrief() {
+  if (isBusy) {
+    toast("이미 AI 작업이 진행 중입니다.");
+    return;
+  }
+  try {
+    syncFieldsToState();
+    validateBriefInputs();
+    requireApiKey();
+    showLoader("사전 브리프를 생성하고 있습니다.", "IM과 세팅값을 통합하고 시장, 뉴스, 정책, 리스크 맥락을 보강합니다.");
+
+    if (selectedFile) {
+      updateLoader("IM을 읽는 중입니다.", "큰 문서는 핵심 페이지 중심으로 읽습니다.");
+      state.imProcessingResult = await processSelectedIm();
+      renderProcessingLog();
+    } else if (state.selectedFileName && !selectedFile) {
+      state.imProcessingResult = null;
+    }
+
+    updateLoader("시장 맥락을 검색하는 중입니다.", "Gemini Google Search grounding으로 최근 시장, 뉴스, 정책 자료를 확인합니다.");
+    state.marketContext = await fetchMarketContext();
+
+    updateLoader("질문과 리스크를 정리하는 중입니다.", "LP 미팅 관점의 예상 Q&A, Red Flag, 후속 요청자료를 구성합니다.");
+    const prompt = buildBriefPrompt();
+    const brief = await callGeminiText(prompt, { json: true, temperature: 0.25 });
+    state.preMeetingBrief = normalizeBrief(parseGeminiJson(brief));
+    state.questionRecords = makeQuestionRecords(state.preMeetingBrief);
+    state.selectedQuestionIndex = 0;
+    state.postMeetingMemo = null;
+
+    saveState();
+    saveMeetingToLibrary();
+    renderAll();
+    switchPhase("live");
+    toast("사전 브리프를 생성하고 미팅 노트로 이동했습니다.");
+  } catch (error) {
+    showError(error);
+  } finally {
+    hideLoader();
+  }
+}
+
+function validateBriefInputs() {
+  const requiredWithoutIm = [
+    ["managerName", "운용사명"],
+    ["fundName", "펀드명 / 대출명"],
+    ["locationType", "실제 투자지역"],
+    ["assetClass", "자산군"],
+    ["strategy", "전략"],
+    ["sector", "섹터"],
+    ["capitalType", "Equity / Debt"],
+    ["investmentStructure", "투자구조"]
+  ];
+  if (selectedFile || state.selectedFileName) return;
+  const missing = requiredWithoutIm
+    .filter(([key]) => !state.meeting[key])
+    .map(([, label]) => label);
+  if (missing.length) {
+    throw new Error(`IM이 없을 때는 ${missing.join(", ")} 입력이 필요합니다.`);
+  }
+}
+
+function requireApiKey() {
+  if (!runtimeConfig.apiKey) throw new Error(LIMIT_MESSAGE);
+}
+
+async function processSelectedIm() {
+  const file = selectedFile;
+  const mimeType = file.type || guessMimeType(file.name);
+  if (mimeType.startsWith("image/")) return processImageFile(file, mimeType);
+  if (mimeType === "text/plain" || file.name.toLowerCase().endsWith(".txt")) return processTextFile(file);
+  if (mimeType === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) return processPdfFile(file);
+  throw new Error("지원하지 않는 파일 형식입니다. PDF, TXT, PNG, JPG 파일을 사용해주세요.");
+}
+
+async function processTextFile(file) {
+  const text = await file.text();
+  const policy = chooseFocusedPolicy({ file, text, pageCount: 1 });
+  const excerpt = policy.mode === "focused" ? text.slice(0, 70000) : text.slice(0, 120000);
+  const analysis = await analyzeImText(excerpt, policy, { fileName: file.name, mimeType: file.type || "text/plain" });
+  return {
+    uploadedFileMetadata: makeFileMeta(file),
+    analysisMode: policy.mode,
+    analysisReasons: policy.reasons,
+    selectedPageNumbers: [1],
+    textExcerpt: excerpt,
+    textCharCount: excerpt.length,
+    imAnalysis: analysis,
+    warning: policy.warning
+  };
+}
+
+async function processImageFile(file, mimeType) {
+  const policy = chooseFocusedPolicy({ file, text: "", pageCount: 1 });
+  const base64 = await fileToBase64(file);
+  const prompt = buildImVisionPrompt(policy, makeFileMeta(file));
+  const text = await callGeminiVision([{ mimeType, data: base64 }], prompt);
+  const analysis = parseGeminiJson(text);
+  return {
+    uploadedFileMetadata: makeFileMeta(file),
+    analysisMode: "vision",
+    analysisReasons: policy.reasons,
+    selectedPageNumbers: [1],
+    textExcerpt: "",
+    textCharCount: 0,
+    imAnalysis: analysis,
+    warning: policy.warning
+  };
+}
+
+async function processPdfFile(file) {
+  const pdf = await extractPdfText(file);
+  const policy = chooseFocusedPolicy({ file, text: pdf.fullText, pageCount: pdf.pageCount });
+  const selectedPages = selectPages(pdf.pages, policy);
+  const selectedText = selectedPages.map((page) => `\n\n[Page ${page.pageNumber}]\n${page.text}`).join("").slice(0, policy.mode === "focused" ? 80000 : 140000);
+
+  let analysis;
+  let warning = policy.warning;
+  if (selectedText.trim().length > 1000) {
+    analysis = await analyzeImText(selectedText, policy, makeFileMeta(file));
+  } else {
+    const images = await renderPdfPages(file, selectedPages.slice(0, 6).map((page) => page.pageNumber));
+    if (!images.length) throw new Error("PDF를 브라우저에서 읽지 못했습니다. 페이지 범위를 줄여 다시 시도해주세요.");
+    const prompt = buildImVisionPrompt(policy, makeFileMeta(file));
+    const text = await callGeminiVision(images, prompt);
+    analysis = parseGeminiJson(text);
+    warning = warning || "텍스트가 적어 이미지 페이지를 Vision으로 읽었습니다.";
+  }
+
+  return {
+    uploadedFileMetadata: makeFileMeta(file),
+    analysisMode: policy.mode,
+    analysisReasons: policy.reasons,
+    selectedPageNumbers: selectedPages.map((page) => page.pageNumber),
+    textExcerpt: selectedText,
+    textCharCount: selectedText.length,
+    imAnalysis: analysis,
+    warning
+  };
+}
+
+async function analyzeImText(text, policy, fileMeta) {
+  const response = await callGeminiText(buildImAnalysisPrompt(text, policy, fileMeta), { json: true, temperature: 0.15 });
+  return parseGeminiJson(response);
+}
+
+function chooseFocusedPolicy({ file, text, pageCount }) {
+  const reasons = [];
+  if (file.size > 8 * 1024 * 1024) reasons.push("파일 용량이 큼");
+  if (pageCount > 40) reasons.push("페이지 수가 많음");
+  if ((text || "").length > 60000) reasons.push("추출 텍스트가 김");
+  if (state.documentSettings.pageReadMode === "focused") reasons.push("사용자가 Focused skim mode 선택");
+  if (state.documentSettings.pageReadMode === "custom") reasons.push("사용자 지정 페이지 우선");
+  const shouldFocus = state.documentSettings.pageReadMode !== "auto" || reasons.length > 0;
+  return {
+    mode: shouldFocus ? "focused" : "standard",
+    reasons,
+    warning: shouldFocus ? "큰 IM 또는 지정 조건에 따라 핵심 정보 중심으로만 읽었습니다." : ""
+  };
+}
+
+function selectPages(pages, policy) {
+  if (!pages.length) return [];
+  if (state.documentSettings.pageReadMode === "custom") {
+    const custom = parsePageRanges(state.documentSettings.customPages, pages.length);
+    if (custom.length) return custom.map((pageNumber) => pages[pageNumber - 1]).filter(Boolean);
+  }
+  if (policy.mode !== "focused") return pages.slice(0, 60);
+
+  const firstPages = pages.slice(0, Math.min(5, pages.length));
+  const keywordPages = [...pages]
+    .map((page) => ({ ...page, score: scorePage(page.text) }))
+    .sort((a, b) => b.score - a.score)
+    .filter((page) => page.score > 0)
+    .slice(0, 10);
+  const map = new Map();
+  [...firstPages, ...keywordPages].forEach((page) => map.set(page.pageNumber, page));
+  return [...map.values()].sort((a, b) => a.pageNumber - b.pageNumber).slice(0, 14);
+}
+
+function scorePage(text = "") {
+  const keywords = [
+    "asset", "strategy", "sector", "region", "deal", "overview", "risk", "sponsor", "borrower",
+    "manager", "portfolio", "track record", "irr", "moic", "ltv", "dscr", "exit", "fee",
+    "자산", "분류", "전략", "섹터", "지역", "딜", "개요", "거래", "관계자", "운용", "스폰서",
+    "차주", "담보", "리스크", "위험", "수익률", "회수", "수수료", "트랙레코드", "투자구조"
+  ];
+  const lowered = text.toLowerCase();
+  return keywords.reduce((score, keyword) => score + (lowered.includes(keyword.toLowerCase()) ? 1 : 0), 0);
+}
+
+async function extractPdfText(file) {
+  const pdfjs = await loadPdfJs();
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = pdfjs.getDocument({ data: arrayBuffer });
+  const doc = await loadingTask.promise;
+  const pages = [];
+  for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
+    const page = await doc.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const text = content.items.map((item) => item.str).join(" ").replace(/\s+/g, " ").trim();
+    pages.push({ pageNumber, text });
+  }
+  return {
+    pageCount: doc.numPages,
+    pages,
+    fullText: pages.map((page) => page.text).join("\n")
+  };
+}
+
+async function renderPdfPages(file, pageNumbers) {
+  const pdfjs = await loadPdfJs();
+  const arrayBuffer = await file.arrayBuffer();
+  const doc = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+  const images = [];
+  for (const pageNumber of pageNumbers) {
+    const page = await doc.getPage(pageNumber);
+    const viewport = page.getViewport({ scale: 1.2 });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const context = canvas.getContext("2d");
+    await page.render({ canvasContext: context, viewport }).promise;
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.72);
+    images.push({ mimeType: "image/jpeg", data: dataUrl.split(",")[1] });
+  }
+  return images;
+}
+
+async function loadPdfJs() {
+  if (!pdfjsLibPromise) {
+    pdfjsLibPromise = import(PDFJS_URL).then((lib) => {
+      lib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+      return lib;
+    });
+  }
+  return pdfjsLibPromise;
+}
+
+function getAssetClassMarketChecklist() {
+  const meeting = state.meeting || {};
+  const im = state.imProcessingResult?.imAnalysis || {};
+  const assetClass = localizeDisplayTerm(meeting.assetClass || im.autoDetectedFields?.assetClass || "");
+  const region = localizeDisplayTerm(meeting.locationType || im.autoDetectedFields?.region || "");
+  const strategy = localizeDisplayTerm(meeting.strategy || im.autoDetectedFields?.strategy || "");
+  const sector = localizeDisplayTerm(meeting.sector || im.autoDetectedFields?.sector || "");
+  const dealName = meeting.fundName || "";
+  const managerName = meeting.managerName || "";
+  const regionScope = region === "국내" ? "한국" : region === "해외" ? "해외/미국/주요 투자지역" : "해당 투자지역";
+  const base = [
+    `${regionScope} 거시경제와 금리 환경`,
+    `${managerName} 운용사 관련 최근 뉴스와 평판 이슈`,
+    `${dealName} 거래명/대출명/펀드명 관련 뉴스`,
+    "IM에 언급된 개별 자산, 차주, 시공사, 보증기관, 포트폴리오 회사, 파이프라인 딜 관련 뉴스"
+  ];
+  let checklist = [];
+  let prioritySearchQueries = [];
+
+  if (/사모투자\(PE\)|Private Equity|PE/i.test(assetClass)) {
+    checklist = [
+      `${regionScope} 거시경제, 기준금리, 인플레이션, 환율 환경`,
+      "Buyout/Growth/VC 등 해당 전략의 거래량, 밸류에이션, Exit, IPO/M&A 분위기",
+      "레버리지론, 사모대출, 조달비용, 리파이낸싱 시장",
+      `${sector || "해당 섹터"} 산업 성장성, 멀티플, 규제/기술 변화`,
+      "해당 GP의 펀드레이징, 투자/회수 실적, 포트폴리오 관련 뉴스",
+      "IM에 언급된 편입 자산 또는 편입 예정 파이프라인 회사 뉴스"
+    ];
+    prioritySearchQueries = [
+      `${regionScope} private equity buyout market exit M&A IPO valuation`,
+      `${regionScope} leveraged loan private equity financing market`,
+      `${managerName} ${dealName} portfolio pipeline news`
+    ];
+  } else if (/사모투자\(PD\)|Private Debt|PD/i.test(assetClass)) {
+    checklist = [
+      `${regionScope} 금리, 크레딧 스프레드, 부실률, 리파이낸싱 환경`,
+      "Direct Lending/Mezzanine/Structured Credit 등 해당 전략 시장 분위기",
+      "차주 섹터의 현금흐름, 담보가치, 회수율, 코버넌트 리스크",
+      "은행 대출 축소, 사모대출 공급, 채권시장 유동성",
+      "해당 GP의 크레딧 운용 실적과 부실/회수 관련 뉴스",
+      "IM에 언급된 차주, 담보자산, 후순위/선순위 구조 관련 뉴스"
+    ];
+    prioritySearchQueries = [
+      `${regionScope} private debt direct lending credit spread default refinancing`,
+      `${sector || ""} private credit borrower covenant risk`,
+      `${managerName} ${dealName} credit loan news`
+    ];
+  } else if (/부동산|Real Estate/i.test(assetClass)) {
+    checklist = [
+      `${regionScope} 거시경제, 기준금리, 부동산 금융/PF 조달 환경`,
+      `${sector || "해당 섹터"} 부동산 임대, 공실, 거래, 캡레이트, 가격 동향`,
+      `${strategy || "해당 전략"} 전략 관련 개발, 인허가, 분양, 매각, 리파이낸싱 시장`,
+      "주요 권역 거래 사례와 유사 자산 매매/임대 사례",
+      "시공사, 차주, 보증기관, 신탁사, 대주단 관련 뉴스",
+      "프로젝트 딜이면 소재지 인근 거래 사례와 해당 자산/부지 관련 뉴스"
+    ];
+    prioritySearchQueries = [
+      `${regionScope} ${sector || "오피스 부동산"} 거래 임대 공실 캡레이트 금리`,
+      `${regionScope} 부동산 PF 대출 조달 리파이낸싱 연체`,
+      `${dealName} ${managerName} 부동산 PF 프로젝트 뉴스`
+    ];
+  } else if (/인프라|Infrastructure/i.test(assetClass)) {
+    checklist = [
+      `${regionScope} 금리, 물가, 환율과 인프라 자산 할인율 환경`,
+      `${sector || "해당 섹터"} 수요, 이용량, 요금체계, 규제/정책 변화`,
+      "사업권, 인허가, 정부계획, 공공기관 정책, 보조금/요금 조정 이슈",
+      "EPC, O&M, 주요 계약상대방, 건설/운영 리스크",
+      "유사 인프라 거래 사례와 수익률/매각 사례",
+      "해당 GP 및 프로젝트/운영사 관련 뉴스"
+    ];
+    prioritySearchQueries = [
+      `${regionScope} infrastructure ${sector || ""} regulation tariff demand policy`,
+      `${regionScope} infrastructure transaction yield financing interest rate`,
+      `${managerName} ${dealName} infrastructure project news`
+    ];
+  } else if (/상품금융|Commodity Finance/i.test(assetClass)) {
+    checklist = [
+      `${regionScope} 금리, 환율, 물류/교역량, 자산가치 환경`,
+      `${sector || "항공기 선박"} 운임, 리스료, 잔존가치, 중고거래 시장`,
+      "차주/리스이용자 신용도, 보험, 정비, 재매각/재리스 가능성",
+      "Balloon 상환 여부, 만기 잔존가치, 담보 처분 가능성",
+      "선박/항공기 규제, 환경규제, 운항/발주/폐선 동향",
+      "관련 자산, 차주, 운용사 뉴스"
+    ];
+    prioritySearchQueries = [
+      `${regionScope} ${sector || "aircraft shipping"} lease rate residual value market`,
+      `${sector || "aircraft shipping"} finance balloon repayment collateral risk`,
+      `${managerName} ${dealName} commodity finance news`
+    ];
+  } else {
+    checklist = [
+      `${regionScope} 거시경제와 금리 환경`,
+      `${assetClass || "해당 자산군"} 시장 동향과 거래 분위기`,
+      `${strategy || "해당 전략"} 전략 관련 리스크와 회수/상환 환경`,
+      `${sector || "해당 섹터"} 산업/시장 뉴스`,
+      "해당 GP와 IM에 언급된 주요 거래상대방 뉴스"
+    ];
+    prioritySearchQueries = [
+      `${regionScope} ${assetClass} ${strategy} ${sector} market trend risk`,
+      `${managerName} ${dealName} news`
+    ];
+  }
+
+  return {
+    assetClass: assetClass || "확인 필요",
+    baselineChecklist: [...base, ...checklist].filter(Boolean),
+    prioritySearchQueries: prioritySearchQueries.map((query) => query.replace(/\s+/g, " ").trim()).filter(Boolean)
+  };
+}
+
+function buildMarketSearchQueries() {
+  const meeting = state.meeting || {};
+  const im = state.imProcessingResult?.imAnalysis || {};
+  const detected = im.autoDetectedFields || {};
+  const checklist = getAssetClassMarketChecklist();
+  const parts = [
+    meeting.managerName,
+    meeting.fundName,
+    meeting.keyConcerns,
+    detected.region,
+    detected.assetClass,
+    detected.strategy,
+    detected.sector,
+    detected.capitalStructure,
+    ...asArray(im.keyRisks).slice(0, 3).map(formatListItemText),
+    ...asArray(im.keyNumbersToVerify).slice(0, 3).map(formatListItemText),
+    ...asArray(im.verificationItems).slice(0, 3).map(formatListItemText)
+  ].filter(Boolean).join(" ");
+  const cleaned = parts.replace(/\s+/g, " ").trim();
+  const region = localizeDisplayTerm(meeting.locationType) || detected.region || "";
+  const assetClass = localizeDisplayTerm(meeting.assetClass) || detected.assetClass || "";
+  const strategy = localizeDisplayTerm(meeting.strategy) || detected.strategy || "";
+  const sector = localizeDisplayTerm(meeting.sector) || detected.sector || "";
+  return [
+    `${region} ${assetClass} ${strategy} ${sector} 시장 동향`,
+    `${region} ${sector} ${strategy} 최근 뉴스 정책 규제`,
+    `${cleaned} 리스크 금리 보증 상환 조건`,
+    `${meeting.managerName || ""} ${meeting.fundName || ""} 운용사 거래 뉴스`,
+    ...checklist.prioritySearchQueries
+  ].map((query) => query.replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 8);
+}
+
+function buildMarketSearchFocus() {
+  const meeting = state.meeting || {};
+  const im = state.imProcessingResult?.imAnalysis || {};
+  const checklist = getAssetClassMarketChecklist();
+  return {
+    gpOrManager: meeting.managerName || "",
+    fundLoanOrDealName: meeting.fundName || "",
+    location: localizeDisplayTerm(meeting.locationType) || "",
+    assetClass: localizeDisplayTerm(meeting.assetClass) || "",
+    strategy: localizeDisplayTerm(meeting.strategy) || "",
+    sector: localizeDisplayTerm(meeting.sector) || "",
+    capitalType: localizeDisplayTerm(meeting.capitalType) || "",
+    investmentStructure: localizeDisplayTerm(meeting.investmentStructure) || "",
+    dealMemo: meeting.keyConcerns || "",
+    imDetectedFields: im.autoDetectedFields || {},
+    imKeyRisks: asArray(im.keyRisks).slice(0, 4).map(formatListItemText),
+    imNumbersToVerify: asArray(im.keyNumbersToVerify).slice(0, 4).map(formatListItemText),
+    imVerificationItems: asArray(im.verificationItems).slice(0, 4).map(formatListItemText),
+    assetClassMarketChecklist: checklist.baselineChecklist,
+    suggestedSearchQueries: buildMarketSearchQueries()
+  };
+}
+
+function formatIsoDate(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function addMonths(date, months) {
+  const next = new Date(date);
+  next.setMonth(next.getMonth() + months);
+  return next;
+}
+
+async function fetchMarketContext() {
+  const searchFocus = buildMarketSearchFocus();
+  const searchDate = new Date();
+  const searchDateText = formatIsoDate(searchDate);
+  const recencyCutoffText = formatIsoDate(addMonths(searchDate, -6));
+  const prompt = `
+기관 LP의 운용사 미팅 준비를 위해 최신 시장, 뉴스, 정책, 규제, 리스크 맥락을 조사해 JSON으로만 답하세요.
+사용자의 "딜 / 자산 메모"에는 자산 개요, 지역, 보증 구조, 과거 이슈, 우려사항, 잠정 판단이 섞여 있을 수 있습니다. 이 메모를 검색 키워드와 리스크 분석의 핵심 단서로 사용하세요.
+한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.
+입력값의 fundName은 펀드명뿐 아니라 직접대출명, PF 대출명, 단일 자산 거래명일 수 있습니다. 시장 맥락과 검색 키워드를 만들 때 펀드형 투자와 직접대출/단일 거래 가능성을 모두 열어두세요.
+
+검색 기준일: ${searchDateText}
+최신 뉴스/정책/시장자료 기준: ${recencyCutoffText} 이후 공개된 자료만 사용
+
+검색/분석 방식:
+- 아래 "검색 초점"의 자산군별 체크리스트를 기본 검색 흐름으로 사용하고, IM/입력값에서 발견되는 특이사항을 추가 검색 단서로 사용하세요.
+- 구체적인 지역, 섹터, 전략, 보증, 금리, 상환, 공사/인허가, 정책 키워드 중심으로 찾으세요.
+- 일반적인 자산군 설명은 1문장 이하로 줄이고, 이번 건과 직접 연결되는 시장/뉴스/정책/리스크만 남기세요.
+- recentEvents, policyRegulatoryNotes, keyMarketTrends, riskSignals, sources에는 반드시 날짜와 출처를 붙이세요.
+- 날짜가 없거나 ${recencyCutoffText} 이전 자료이면 최신 뉴스/정책/시장자료처럼 쓰지 말고 배열에서 제외하세요.
+- "날짜 확인 필요", "출처 확인 필요", "최근 자료 확인 필요" 같은 문구를 출력하지 마세요. 근거가 없으면 해당 배열을 비우고 sourceQuality에 부족하다고 쓰세요.
+- 금리 상승, 인플레이션, 거래 위축, 밸류에이션 변화 같은 판단은 어느 시점의 어떤 출처에 근거한 것인지 date/source/fact로 명시하세요.
+- 검색 결과가 부족하면 부족하다고 표시하고, 추정으로 채우지 마세요.
+- 토큰을 아끼기 위해 각 배열은 최대 개수만 지키고 짧게 작성하세요.
+
+검색 초점:
+${JSON.stringify(searchFocus, null, 2)}
+
+미팅 세팅값:
+${JSON.stringify(state.meeting, null, 2)}
+
+IM 분석 요약:
+${JSON.stringify(state.imProcessingResult?.imAnalysis || {}, null, 2)}
+
+JSON 스키마:
+{
+  "summary": "날짜와 출처가 확인된 최신 근거만 사용한 핵심 시장 맥락 3문장 이내",
+  "keyMarketTrends": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "자료/기사명", "fact": "확인된 시장 동향", "relevance": "이번 건과의 관련성"}],
+  "recentEvents": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "기사/공시/자료명", "fact": "확인된 최근 이벤트", "relevance": "이번 건과의 관련성"}],
+  "policyRegulatoryNotes": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "정책/규제/자료명", "fact": "확인된 정책/규제 내용", "relevance": "이번 건과의 관련성"}],
+  "riskSignals": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "근거 자료명", "fact": "이번 건에서 확인해야 할 리스크 신호", "relevance": "LP 확인 포인트"}],
+  "lpQuestions": ["최대 5개. 위 최신 근거에서 파생된 LP 질문"],
+  "followUpRequests": ["최대 3개. 시장/정책 확인용 추가 요청자료"],
+  "sources": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "출처 제목", "note": "이번 건과의 관련성"}],
+  "sourceQuality": "6개월 이내 날짜가 확인된 구체적 자료 충분/부족. 부족하면 어떤 축이 부족한지 설명"
+}`;
+  const text = await callGeminiWithSearch(prompt);
+  return parseGeminiJson(text);
+}
+
+function buildBriefPrompt() {
+  return `
+당신은 기관 LP의 대체투자 운용사 미팅을 준비하는 AI 코파일럿입니다.
+아래 입력값을 바탕으로 사전 준비 결과를 JSON으로만 작성하세요.
+한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.
+
+중요 원칙:
+- IM이 있으면 IM 확인 내용을 우선하되, 사용자가 입력한 세팅값은 보정값으로 사용합니다.
+- fundName 필드는 펀드명일 수도 있고 직접대출명, PF 대출명, 단일 자산 거래명일 수도 있습니다. 모든 케이스를 블라인드풀 펀드로 가정하지 말고, 입력/IM이 직접대출, PF 대출, 단일 차주·단일 자산 대출, 단일 트랜치로 보이면 "본 펀드" 대신 "본 건", "본 대출", "본 거래"라고 표현하세요.
+- 직접대출 또는 단일 트랜치 Senior Debt로 보이는 경우에는 "Senior Debt 외 다른 트랜치 존재 여부"를 기본 질문으로 만들지 마세요. 대신 단일 선순위 대출인지, 담보권·보증·상환재원·LTV/DSCR·EOD·약정 조건·대주간 권리관계·후순위/메자닌 동반 여부가 실제로 필요한 경우만 확인 질문으로 작성하세요.
+- "딜 / 자산 메모"는 단순 우려사항이 아니라 사용자가 알고 있는 자산 개요, 지역, 보증 구조, 과거 이슈, 잠정 판단을 담는 핵심 맥락입니다.
+- 이 메모의 표현을 그대로 믿기보다, 시장/뉴스/정책/리스크 맥락과 대조해 확인 필요 항목과 질문으로 전환합니다.
+- 시장/뉴스/정책 맥락은 일반론보다 이번 건의 지역, 자산군, 섹터, 전략, 보증, 금리, 상환 구조와 직접 연결되는 내용만 우선 사용합니다.
+- 시장/뉴스/정책 항목은 state.marketContext의 date/source/title/fact/relevance를 유지해서 작성합니다.
+- "날짜 확인 필요", "출처 확인 필요" 같은 문구를 만들지 마세요. 날짜/출처가 없는 뉴스는 최신 근거처럼 쓰지 말고 확인 필요 항목으로 돌리세요.
+- IM 내용과 사용자가 입력한 값이 충돌하면 conflicts 또는 verificationItems에 표시합니다.
+- IM 내부에서 같은 항목의 숫자, 금리, 수익률, LTV, DSCR, 기간, 금액, 약정 조건이 서로 다르게 적혀 있으면 억지로 단정하지 말고 "원문 대조 필요"로 표시하고 expectedQaList에 운용사 확인 질문을 포함하세요.
+- 예: 주택도시기금 금리가 한 곳에는 2.8%, 다른 곳에는 2.6%로 보이면 "적용 기준일, 적용 구간, 산식 또는 오기 여부"를 묻는 Q&A를 만드세요.
+- 정보가 부족하면 지어내지 말고 "확인 필요"로 표시합니다.
+- 질문은 실제 미팅에서 바로 읽을 수 있는 수준으로 구체적으로 작성합니다.
+
+세팅값:
+${JSON.stringify(state.meeting, null, 2)}
+
+IM 처리 결과:
+${JSON.stringify(state.imProcessingResult || null, null, 2)}
+
+시장/뉴스/정책/리스크 맥락:
+${JSON.stringify(state.marketContext || null, null, 2)}
+
+응답 JSON 스키마:
+{
+  "fundSnapshot": {
+    "managerName": "운용사명 또는 확인 필요",
+    "fundName": "펀드명, 대출명, 거래명 또는 확인 필요",
+    "strategy": "전략",
+    "region": "지역",
+    "assetClass": "자산군",
+    "capitalStructure": "투자구조",
+    "keyNumbers": ["핵심 숫자"]
+  },
+  "classificationSummary": {
+    "confirmedFromIm": ["IM에서 확인된 정보"],
+    "providedByUser": ["사용자가 입력한 정보"],
+    "conflicts": ["충돌 정보"],
+    "needsVerification": ["확인 필요 정보"]
+  },
+  "marketContext": {
+    "summary": "날짜와 출처가 확인된 시장 맥락 요약",
+    "trends": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "자료명", "fact": "시장 동향", "relevance": "이번 건과의 관련성"}],
+    "newsPolicy": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "뉴스/정책명", "fact": "뉴스/정책/규제 내용", "relevance": "이번 건과의 관련성"}],
+    "riskSignals": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "근거 자료명", "fact": "리스크 신호", "relevance": "LP 확인 포인트"}],
+    "sources": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "출처 제목"}]
+  },
+  "expectedQaList": [
+    {
+      "category": "트랙레코드/전략/리스크/조건/운영 등",
+      "importance": "High/Medium/Low",
+      "question": "질문",
+      "rationale": "왜 물어봐야 하는지",
+      "source": "IM/사용자 입력/시장 검색/템플릿"
+    }
+  ],
+  "keyRisks": ["핵심 리스크"],
+  "redFlags": ["Red Flag 체크리스트"],
+  "expectedFollowUpRequests": ["예상 추가 요청자료"],
+  "verificationItems": ["원문 대조 또는 추가 확인 필요 항목"]
+}`;
+}
+
+function buildImAnalysisPrompt(text, policy, fileMeta) {
+  return `
+기관 LP가 운용사 미팅 전에 IM을 빠르게 파악하려고 합니다.
+아래 IM 텍스트를 읽고 JSON으로만 요약하세요.
+한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.
+IM이 펀드형 투자자료인지, 직접대출/프로젝트 파이낸싱/단일 자산 거래자료인지 먼저 구분하세요. 직접대출 또는 단일 트랜치 대출이면 fundName에는 대출명 또는 거래명을 넣고, 질문은 펀드 운용전략보다 차주, 담보, 보증, 상환재원, 선순위성, 약정 조건 중심으로 정리하세요.
+
+분석 모드: ${policy.mode}
+파일 정보: ${JSON.stringify(fileMeta)}
+
+Focused skim mode일 때는 다음 항목을 최우선으로 봅니다:
+자산분류, 섹터, 지역, 딜 개요, 관계 플레이어, 주요 리스크 사항, 투자구조, 핵심 숫자.
+숫자/조건 정합성도 자연스럽게 점검하세요. 같은 항목의 금리, 수익률, LTV, DSCR, 대출기간, 상환조건, 보증조건, 수수료, 금액이 페이지별로 다르면 keyNumbersToVerify, conflicts, verificationItems, mustAskQuestionsFromIm에 반영하세요.
+
+IM 텍스트:
+${text}
+
+응답 JSON 스키마:
+{
+  "fundSnapshot": {},
+  "strategySummary": "전략 요약",
+  "keyInvestmentMerits": ["투자 포인트"],
+  "keyRisks": ["리스크"],
+  "keyNumbersToVerify": ["확인해야 할 숫자"],
+  "trackRecordCheckpoints": ["트랙레코드 확인사항"],
+  "mustAskQuestionsFromIm": ["IM 기반 필수 질문"],
+  "followUpRequestsFromIm": ["IM 기반 추가 요청자료"],
+  "autoDetectedFields": {
+    "managerName": "",
+    "fundName": "",
+    "assetClass": "",
+    "region": "",
+    "strategy": "",
+    "sector": "",
+    "capitalType": "",
+    "investmentStructure": ""
+  },
+  "conflicts": [],
+  "verificationItems": []
+}`;
+}
+
+function buildImVisionPrompt(policy, fileMeta) {
+  return `
+기관 LP가 운용사 미팅 전에 이미지/PDF IM을 읽으려고 합니다.
+첨부 이미지를 보고 JSON으로만 답하세요.
+한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.
+IM이 펀드형 투자자료인지, 직접대출/프로젝트 파이낸싱/단일 자산 거래자료인지 먼저 구분하세요. 직접대출 또는 단일 트랜치 대출이면 fundName에는 대출명 또는 거래명을 넣고, 질문은 펀드 운용전략보다 차주, 담보, 보증, 상환재원, 선순위성, 약정 조건 중심으로 정리하세요.
+
+분석 모드: ${policy.mode}
+파일 정보: ${JSON.stringify(fileMeta)}
+
+우선 추출 항목:
+자산분류, 섹터, 지역, 딜 개요, 관계 플레이어, 주요 리스크 사항, 투자구조, 핵심 숫자, 트랙레코드, 수수료/조건.
+숫자/조건 정합성도 자연스럽게 점검하세요. 같은 항목의 금리, 수익률, LTV, DSCR, 대출기간, 상환조건, 보증조건, 수수료, 금액이 페이지별로 다르면 keyNumbersToVerify, conflicts, verificationItems, mustAskQuestionsFromIm에 반영하세요.
+
+응답 JSON 스키마:
+{
+  "fundSnapshot": {},
+  "strategySummary": "",
+  "keyInvestmentMerits": [],
+  "keyRisks": [],
+  "keyNumbersToVerify": [],
+  "trackRecordCheckpoints": [],
+  "mustAskQuestionsFromIm": [],
+  "followUpRequestsFromIm": [],
+  "autoDetectedFields": {},
+  "conflicts": [],
+  "verificationItems": []
+}`;
+}
+
+async function generateReport() {
+  if (isBusy) {
+    toast("이미 AI 작업이 진행 중입니다.");
+    return;
+  }
+  try {
+    syncFieldsToState();
+    requireApiKey();
+    if (!state.preMeetingBrief) throw new Error("먼저 사전 브리프를 생성해주세요.");
+    const hasMeetingInputs = state.questionRecords.some((q) => hasAnswer(q.answerRecord)) || state.meetingNotes.trim() || state.transcript.trim();
+    if (!hasMeetingInputs) throw new Error("미팅 답변, 자유 메모, Transcript 중 하나 이상을 입력해주세요.");
+
+    switchPhase("report");
+    showLoader("최종 보고서를 생성하고 있습니다.", "사전 분석과 미팅 중 기록을 논점별로 종합합니다.");
+    const prompt = buildReportPrompt();
+    const text = await callGeminiText(prompt, { json: true, temperature: 0.2 });
+    state.postMeetingMemo = parseGeminiJson(text);
+    saveState();
+    saveMeetingToLibrary();
+    renderReport();
+    renderStatus();
+    toast("최종 보고서를 생성했습니다.");
+  } catch (error) {
+    showError(error);
+  } finally {
+    hideLoader();
+  }
+}
+
+function buildReportPrompt() {
+  const tone = getReportToneConfig(state.reportTone);
+  return `
+당신은 기관 LP의 운용사 미팅 후속 정리를 돕는 AI 코파일럿입니다.
+사전 분석, 질문별 답변, 내부 메모, 자유 메모, Transcript를 종합해 JSON으로만 답하세요.
+확인되지 않은 내용은 단정하지 말고 "확인 필요"로 표시하세요.
+한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.
+fundName은 펀드명뿐 아니라 직접대출명, PF 대출명, 단일 자산 거래명일 수 있습니다. 직접대출 또는 단일 트랜치 대출이면 보고서 문장에서도 "본 펀드"보다 "본 건", "본 대출", "본 거래"를 우선 사용하세요.
+
+보고서 톤:
+- 선택값: ${tone.label}
+- 검토의견 기본값: ${tone.reviewOpinion}
+- 작성 지침: ${tone.promptInstruction}
+- 최종 DOCX는 DOCX_FINAL_WANTED.docx 양식에 들어갑니다. 아래 6개 섹션에 맞는 내용만 생성하세요.
+  01 요약: 펀드명/대출명/거래명, 운용사, 미팅일자, 검토 결과, 심사역 의견에 들어갈 핵심 문장
+  02 미팅 개요: 미팅 정보와 지역/자산군/전략/구조를 간결히 정리
+  03 심사역 검토 의견: 최대 5개 bullet, 각 bullet은 1~2문장
+  04 핵심 DDQ: 최대 5개 질문과 GP 답변 요지
+  05 주요 예상 리스크: 최대 6개 리스크, 구분/내용/심각도/당사 View로 나뉘어 들어갈 수 있게 작성
+  06 향후 Follow-up: 1~3개 핵심 후속 확인사항만 작성. 항목 내용만 쓰고 담당/기한/상태는 생성하지 마세요.
+- 한 줄 결론과 내부 보고용 간이보고서도 이 DOCX 양식에 맞춰 작성하세요.
+- 단, 긍정적 톤이어도 원문 대조 필요 항목과 추가 DD 필요 사항은 반드시 남기세요.
+- 모든 문장은 보고서형 음슴체로 작성하세요. 예: "~입니다", "~합니다", "~됩니다" 금지. "~임", "~함", "~됨", "~필요", "~검토 필요"처럼 끝내세요.
+- DDQ 질문과 GP 답변 요지도 한국어로 작성하세요. 영어 원문 답변이 있으면 그대로 복사하지 말고 한국어로 요약하세요.
+- 내부 보고용 간이보고서는 5문장 이내로만 작성하세요.
+- 불필요한 일반론, 긴 배경 설명, 중복 문장은 제외하세요.
+
+세팅값:
+${JSON.stringify(state.meeting, null, 2)}
+
+사전 브리프:
+${JSON.stringify(state.preMeetingBrief, null, 2)}
+
+시장 맥락:
+${JSON.stringify(state.marketContext, null, 2)}
+
+질문별 미팅 기록:
+${JSON.stringify(getQuestionRecordsForReport(), null, 2)}
+
+자유 메모:
+${state.meetingNotes}
+
+Transcript:
+${state.transcript}
+
+응답 JSON 스키마:
+{
+  "issueBasedMeetingNotes": [{"issue": "논점", "summary": "회의록 요약", "evidence": "근거/발언"}],
+  "unresolvedIssues": ["미해결 쟁점"],
+  "followUpRequestList": ["1~3개. 핵심 후속 요청자료 또는 액션. 항목 내용만 작성하고 담당/기한/상태는 제외"],
+  "followUpEmailDraft": "운용사에게 보낼 이메일 초안",
+  "internalReportSummary": {
+    "oneLineView": "한 줄 검토 의견",
+    "investmentMemo": "심사역 검토 의견. 5문장 이내, DOCX 03 섹션에 들어갈 내용",
+    "riskView": "리스크 관점"
+  },
+  "nextActionItems": ["다음 액션"],
+  "qualityChecks": ["품질 점검"],
+  "sourceVerificationItems": ["원문 대조 필요 항목"]
+}`;
+}
+
+async function callGeminiText(prompt, options = {}) {
+  const body = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: options.temperature ?? 0.2
+    }
+  };
+  if (options.json) body.generationConfig.responseMimeType = "application/json";
+  return callGeminiGenerate(body);
+}
+
+async function callGeminiVision(files, prompt) {
+  const parts = [{ text: prompt }];
+  files.forEach((file) => {
+    parts.push({ inline_data: { mime_type: file.mimeType, data: file.data } });
+  });
+  return callGeminiGenerate({
+    contents: [{ role: "user", parts }],
+    generationConfig: { temperature: 0.15, responseMimeType: "application/json" }
+  });
+}
+
+async function callGeminiWithSearch(prompt) {
+  return callGeminiGenerate({
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    tools: [{ google_search: {} }],
+    generationConfig: { temperature: 0.2 }
+  });
+}
+
+async function callGeminiGenerate(body) {
+  requireApiKey();
+  const model = runtimeConfig.model || DEFAULT_MODEL;
+  try {
+    return await callGeminiModel(model, body);
+  } catch (error) {
+    if (shouldFallbackToFlashLite(model, error)) {
+      toast(`${model} 호출이 ${describeGeminiFallbackReason(error)}로 실패해 이번 요청만 Flash Lite로 다시 시도합니다. 설정 모델은 유지됩니다.`);
+      logGeminiDiagnostic({
+        model,
+        status: error?.gemini?.status || null,
+        statusText: error?.gemini?.statusText || "",
+        reason: "fallback_for_this_request",
+        rawMessage: error?.gemini?.rawMessage || error?.message || ""
+      });
+      try {
+        return await callGeminiModel(FALLBACK_MODEL, body);
+      } catch (fallbackError) {
+        throw new Error(`기본 모델과 Flash Lite 재시도 모두 실패했습니다. ${fallbackError.message}`);
+      }
+    }
+    throw error;
+  }
+}
+
+async function callGeminiModel(model, body) {
+  lastGeminiModelUsed = model;
+  const url = `${GEMINI_API_BASE}/${encodeURIComponent(model)}:generateContent`;
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": runtimeConfig.apiKey
+      },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      const info = getGeminiErrorInfo(errorText, response.status, model);
+      logGeminiDiagnostic(info);
+      throw createGeminiApiError(info.message, info);
+    }
+    const data = await response.json();
+    const text = data.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("\n").trim();
+    if (!text) throw new Error(LIMIT_MESSAGE);
+    return text;
+  } catch (error) {
+    throw error instanceof Error ? error : new Error(LIMIT_MESSAGE);
+  }
+}
+
+function shouldFallbackToFlashLite(model, error = "") {
+  if (model === FALLBACK_MODEL) return false;
+  const message = typeof error === "string" ? error : error?.message || "";
+  const info = typeof error === "string" ? null : error?.gemini;
+  if (info?.status === 429 || info?.status === 503) return true;
+  if (["rate_limit", "unavailable"].includes(info?.reason)) return true;
+  return /503|UNAVAILABLE|high demand|quota|429|RESOURCE_EXHAUSTED|GenerateContentRequestsPerDay|사용량이 많습니다/i.test(message);
+}
+
+function describeGeminiFallbackReason(error = {}) {
+  const info = error?.gemini || {};
+  const raw = `${info.status || ""} ${info.statusText || ""} ${info.rawMessage || ""} ${error?.message || ""}`;
+  if (info.reason === "unavailable" || /503|UNAVAILABLE|high demand/i.test(raw)) return "모델 혼잡 또는 일시 장애";
+  if (/TPM|input_token|output_token|token/i.test(raw)) return "토큰 처리량 한도";
+  if (/RPM|RequestsPerMinute|GenerateContentRequestsPerMinute/i.test(raw)) return "분당 요청 수 한도";
+  if (/RPD|RequestsPerDay|GenerateContentRequestsPerDay/i.test(raw)) return "일일 요청 수 한도";
+  if (info.status === 429 || /429|RESOURCE_EXHAUSTED|quota|rate limit/i.test(raw)) return "프로젝트/API 한도";
+  return "한도 또는 일시 혼잡";
+}
+
+function normalizeGeminiApiError(errorText, status, model) {
+  return getGeminiErrorInfo(errorText, status, model).message;
+}
+
+function getGeminiErrorInfo(errorText, status, model) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(errorText);
+  } catch {
+    parsed = null;
+  }
+  const rawMessage = parsed?.error?.message || errorText || "";
+  const statusText = parsed?.error?.status || "";
+  const base = {
+    model,
+    status,
+    statusText,
+    rawMessage,
+    reason: "unknown"
+  };
+  if (/503|UNAVAILABLE|high demand/i.test(`${status} ${statusText} ${rawMessage}`)) {
+    return {
+      ...base,
+      reason: "unavailable",
+      message: `${model} 모델이 일시적으로 혼잡합니다. 잠시 후 다시 시도하거나 Flash Lite를 사용하세요.`
+    };
+  }
+  if (/429|RESOURCE_EXHAUSTED|quota|rate limit|GenerateContentRequestsPerDay|RPM|TPM|RPD/i.test(`${status} ${statusText} ${rawMessage}`)) {
+    return {
+      ...base,
+      reason: "rate_limit",
+      message: `${model} 모델의 프로젝트 한도 또는 분당 한도에 걸렸습니다. 잠시 후 다시 시도하거나 다른 프로젝트/API Key 또는 Flash Lite를 사용하세요.`
+    };
+  }
+  if (/API key not valid|permission|PERMISSION_DENIED|unauth|403|401/i.test(`${status} ${statusText} ${rawMessage}`)) {
+    return {
+      ...base,
+      reason: "auth",
+      message: "API Key가 유효하지 않거나 이 모델을 사용할 권한이 없습니다. 설정에서 새 키를 저장했는지 확인하세요."
+    };
+  }
+  if (/not found|404|model/i.test(`${status} ${statusText} ${rawMessage}`)) {
+    return {
+      ...base,
+      reason: "model_not_found",
+      message: `${model} 모델을 사용할 수 없습니다. 설정에서 다른 Gemini 모델을 선택하세요.`
+    };
+  }
+  return {
+    ...base,
+    message: rawMessage || LIMIT_MESSAGE
+  };
+}
+
+function createGeminiApiError(message, info = {}) {
+  const error = new Error(message || LIMIT_MESSAGE);
+  error.gemini = info;
+  return error;
+}
+
+function getGeminiErrorInfoFromError(error) {
+  if (error?.gemini) return error.gemini;
+  return {
+    model: lastGeminiModelUsed,
+    status: null,
+    statusText: "",
+    rawMessage: error?.message || "",
+    reason: "client_error",
+    message: error?.message || LIMIT_MESSAGE
+  };
+}
+
+function logGeminiDiagnostic(info) {
+  if (!window.console?.warn) return;
+  console.warn("[Gemini diagnostic]", {
+    model: info.model,
+    status: info.status,
+    statusText: info.statusText,
+    reason: info.reason,
+    rawMessage: info.rawMessage
+  });
+}
+
+function parseGeminiJson(text) {
+  if (typeof text !== "string") return text;
+  const stripped = text
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  try {
+    return JSON.parse(stripped);
+  } catch {
+    const start = stripped.indexOf("{");
+    const end = stripped.lastIndexOf("}");
+    if (start >= 0 && end > start) return JSON.parse(stripped.slice(start, end + 1));
+    throw new Error(LIMIT_MESSAGE);
+  }
+}
+
+function normalizeBrief(brief) {
+  const expectedQaList = Array.isArray(brief.expectedQaList) ? brief.expectedQaList.map(normalizeQuestionForDealType) : [];
+  const imIssueQuestions = buildImIssueQuestions();
+  return {
+    fundSnapshot: brief.fundSnapshot || {},
+    classificationSummary: brief.classificationSummary || {},
+    marketContext: normalizeBriefMarketContext(brief.marketContext || {}),
+    expectedQaList: mergeQuestionLists([...imIssueQuestions, ...expectedQaList]),
+    keyRisks: asArray(brief.keyRisks),
+    redFlags: asArray(brief.redFlags),
+    expectedFollowUpRequests: asArray(brief.expectedFollowUpRequests),
+    verificationItems: mergeTextLists([...asArray(brief.verificationItems), ...imIssueQuestions.map((item) => item.rationale)])
+  };
+}
+
+function normalizeBriefMarketContext(context = {}) {
+  const external = state.marketContext || {};
+  return {
+    summary: context.summary || external.summary || "",
+    trends: asArray(context.trends).length ? context.trends : asArray(external.keyMarketTrends),
+    newsPolicy: asArray(context.newsPolicy).length
+      ? context.newsPolicy
+      : [...asArray(external.recentEvents), ...asArray(external.policyRegulatoryNotes)],
+    riskSignals: asArray(context.riskSignals).length ? context.riskSignals : asArray(external.riskSignals),
+    sources: asArray(context.sources).length ? context.sources : asArray(external.sources),
+    sourceQuality: context.sourceQuality || external.sourceQuality || ""
+  };
+}
+
+function buildImIssueQuestions() {
+  const analysis = state.imProcessingResult?.imAnalysis || {};
+  const aiIssues = [
+    ...asArray(analysis.conflicts),
+    ...asArray(analysis.verificationItems),
+    ...asArray(analysis.keyNumbersToVerify)
+  ].map((item) => makeImIssueQuestion(formatListItemText(item), "AI/IM 분석"));
+  const detectedIssues = detectNumericInconsistencies(state.imProcessingResult?.textExcerpt || "")
+    .map((item) => makeImIssueQuestion(item, "IM 숫자 정합성"));
+  return mergeQuestionLists([...detectedIssues, ...aiIssues]).slice(0, 6);
+}
+
+function makeImIssueQuestion(issueText, source = "IM 원문 대조") {
+  const text = String(issueText || "").trim();
+  if (!text) return null;
+  const numberLike = /%|bp|bps|금리|수익률|LTV|DSCR|기간|만기|금액|억|원|배|개월|년|상환|보증|약정|수수료/i.test(text);
+  return {
+    category: numberLike ? "IM 숫자/조건 정합성" : "IM 원문 대조",
+    importance: numberLike ? "High" : "Medium",
+    question: numberLike
+      ? `IM에서 ${text} 항목의 기준 또는 수치가 원문상 다르게 보입니다. 정확한 적용 기준, 산식, 기준일 및 오기 여부를 확인해주실 수 있습니까?`
+      : `IM에서 ${text} 항목은 원문 대조 또는 추가 설명이 필요해 보입니다. 정확한 사실관계와 판단 근거를 설명해주실 수 있습니까?`,
+    rationale: `IM 원문 확인 필요: ${text}`,
+    source
+  };
+}
+
+function detectNumericInconsistencies(text) {
+  const compact = String(text || "").replace(/\s+/g, " ");
+  if (!compact) return [];
+  const metrics = [
+    { label: "주택도시기금 금리", pattern: /(?:주택도시기금|기금)[^.%]{0,80}?금리[^.%]{0,80}?(\d+(?:\.\d+)?)\s*%|금리[^.%]{0,80}?(?:주택도시기금|기금)[^.%]{0,80}?(\d+(?:\.\d+)?)\s*%/gi, unit: "%" },
+    { label: "HUG 보증 관련 금리", pattern: /HUG[^.%]{0,80}?금리[^.%]{0,80}?(\d+(?:\.\d+)?)\s*%|금리[^.%]{0,80}?HUG[^.%]{0,80}?(\d+(?:\.\d+)?)\s*%/gi, unit: "%" },
+    { label: "대출 금리", pattern: /(?:대출|차입|PF)[^.%]{0,80}?금리[^.%]{0,80}?(\d+(?:\.\d+)?)\s*%|금리[^.%]{0,80}?(?:대출|차입|PF)[^.%]{0,80}?(\d+(?:\.\d+)?)\s*%/gi, unit: "%" },
+    { label: "LTV", pattern: /LTV[^.%]{0,60}?(\d+(?:\.\d+)?)\s*%/gi, unit: "%" },
+    { label: "DSCR", pattern: /DSCR[^.\n]{0,60}?(\d+(?:\.\d+)?)\s*(?:x|배)?/gi, unit: "x" }
+  ];
+  return metrics.flatMap(({ label, pattern, unit }) => {
+    const values = collectMetricValues(compact, pattern, unit);
+    return values.length > 1 ? [`${label}가 ${values.join(", ")}로 복수 기재됨`] : [];
+  });
+}
+
+function collectMetricValues(text, pattern, unit = "") {
+  const values = new Set();
+  for (const match of text.matchAll(pattern)) {
+    const value = match.slice(1).find(Boolean);
+    if (value) values.add(`${value}${unit}`);
+  }
+  return [...values];
+}
+
+function mergeQuestionLists(items) {
+  const seen = new Set();
+  return items.filter(Boolean).filter((item) => {
+    const key = String(item.question || item).replace(/\s+/g, " ").trim().toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function mergeTextLists(items) {
+  const seen = new Set();
+  return items.filter(Boolean).map((item) => String(item).trim()).filter((item) => {
+    const key = item.replace(/\s+/g, " ").toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizeQuestionForDealType(item) {
+  if (!item || typeof item !== "object") return item;
+  if (!isDirectLoanLikeCase()) return item;
+  return {
+    ...item,
+    question: rewriteFundOnlyQuestion(item.question),
+    rationale: rewriteFundOnlyQuestion(item.rationale)
+  };
+}
+
+function rewriteFundOnlyQuestion(value) {
+  if (!value) return value;
+  return String(value)
+    .replace(/본 펀드/g, "본 건")
+    .replace(/펀드명/g, "펀드명 / 대출명")
+    .replace(/정확한 명칭과 투자 구조\(Senior Debt 외 다른 트랜치 존재 여부 등\)는 어떻게 됩니까\?/g, "정확한 대출명, 차주/담보 구조, 선순위성 및 주요 약정 조건은 어떻게 됩니까?")
+    .replace(/Senior Debt 외 다른 트랜치 존재 여부/g, "후순위/메자닌 동반 여부가 실제로 필요한 경우 그 사유");
+}
+
+function isDirectLoanLikeCase() {
+  const text = [
+    state.meeting.fundName,
+    state.meeting.assetClass,
+    state.meeting.strategy,
+    state.meeting.sector,
+    state.meeting.capitalType,
+    state.meeting.investmentStructure,
+    state.meeting.keyConcerns,
+    state.imProcessingResult?.imAnalysis?.strategySummary,
+    JSON.stringify(state.imProcessingResult?.imAnalysis?.autoDetectedFields || {})
+  ].join(" ").toLowerCase();
+  return /대출|loan|debt|credit|pf|project finance|senior|차주|담보|보증|hug|단일|tranche|트랜치|private debt|pd|direct lending/.test(text);
+}
+
+function makeQuestionRecords(brief) {
+  const questions = brief.expectedQaList.length
+    ? brief.expectedQaList
+    : asArray(state.imProcessingResult?.imAnalysis?.mustAskQuestionsFromIm).map((question) => ({ question, category: "IM", importance: "High" }));
+  return questions.map((item, index) => ({
+    id: crypto.randomUUID ? crypto.randomUUID() : `q-${Date.now()}-${index}`,
+    category: item.category || "질문",
+    importance: item.importance || "Medium",
+    question: item.question || String(item),
+    rationale: item.rationale || "",
+    source: item.source || "",
+    answerRecord: {
+      status: "미확인",
+      answer: "",
+      internalMemo: "",
+      followUpNeeded: false,
+      importantQuote: ""
+    }
+  }));
+}
+
+function renderBrief() {
+  const container = $("briefOutput");
+  if (!state.preMeetingBrief) {
+    container.innerHTML = `
+      <div class="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-500">
+        브리프를 생성하면 Fund Snapshot, 시장 맥락, 예상 Q&A, 리스크, Red Flag가 여기에 표시됩니다.
+      </div>`;
+    return;
+  }
+  const brief = state.preMeetingBrief;
+  container.innerHTML = `
+    <div class="grid gap-4 lg:grid-cols-2">
+      ${card("Fund Snapshot", renderObjectList(brief.fundSnapshot))}
+      ${card("Investment Classification Summary", renderClassification(brief.classificationSummary))}
+      ${card("AI Market Context", renderMarketContext(brief.marketContext), "lg:col-span-2")}
+      ${card("예상 Q&A", renderQuestionsPreview(brief.expectedQaList), "lg:col-span-2")}
+      ${card("핵심 리스크", renderList(brief.keyRisks))}
+      ${card("Red Flag Checklist", renderList(brief.redFlags))}
+      ${card("Expected Follow-up Requests", renderList(brief.expectedFollowUpRequests))}
+      ${card("확인 필요 항목", renderList(brief.verificationItems))}
+    </div>
+    <div class="mt-5 flex justify-center">
+      <button id="goLiveButton" class="inline-flex items-center justify-center gap-2 rounded-md bg-slate-900 px-5 py-2.5 text-sm font-extrabold text-white shadow-sm transition hover:bg-slate-800">
+        미팅 노트로 이동
+        <i data-lucide="arrow-right" class="h-4 w-4"></i>
+      </button>
+    </div>`;
+  $("goLiveButton").addEventListener("click", () => switchPhase("live"));
+  refreshIcons();
+}
+
+function card(title, body, extraClass = "") {
+  return `<div class="brief-card ${extraClass}"><h3>${escapeHtml(title)}</h3>${body}</div>`;
+}
+
+function renderObjectList(object = {}) {
+  const entries = Object.entries(object).filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== "");
+  if (!entries.length) return emptyText();
+  return `<dl class="space-y-2 text-sm">${entries.map(([key, value]) => `
+    <div class="grid grid-cols-[130px_1fr] gap-3">
+      <dt class="font-bold text-slate-500">${escapeHtml(labelize(key))}</dt>
+      <dd class="text-slate-800">${Array.isArray(value) ? renderInlineList(value) : escapeHtml(String(value))}</dd>
+    </div>`).join("")}</dl>`;
+}
+
+function renderClassification(summary = {}) {
+  return [
+    ["IM에서 확인", summary.confirmedFromIm],
+    ["사용자 입력", summary.providedByUser],
+    ["충돌 정보", summary.conflicts],
+    ["확인 필요", summary.needsVerification]
+  ].map(([title, items]) => `<div class="mb-3"><div class="mb-1 text-xs font-extrabold text-slate-500">${title}</div>${renderList(items)}</div>`).join("");
+}
+
+function hasWeakMarketDate(value) {
+  const text = String(value || "").trim();
+  return !text || /확인\s*필요|unknown|n\/a|미상|불명/i.test(text);
+}
+
+function isWeakMarketItem(item) {
+  const text = formatListItemText(item);
+  if (/날짜\s*확인\s*필요|출처\s*확인\s*필요|최근\s*자료\s*확인\s*필요/i.test(text)) return true;
+  if (item && typeof item === "object" && !Array.isArray(item)) {
+    return hasWeakMarketDate(item.date || item.publishedAt || item.asOfDate) || !String(item.source || "").trim();
+  }
+  return false;
+}
+
+function renderMarketEvidenceList(items) {
+  const filtered = asArray(items).filter((item) => item && !isWeakMarketItem(item));
+  if (!filtered.length) return `<p class="text-sm leading-6 text-slate-400">최근 6개월 내 날짜와 출처가 확인된 근거 없음</p>`;
+  return `<div class="space-y-2">${filtered.map(renderMarketEvidenceItem).join("")}</div>`;
+}
+
+function renderMarketEvidenceItem(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    return `<div class="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm leading-6 text-slate-700">${escapeHtml(formatListItemText(item))}</div>`;
+  }
+  const date = item.date || item.publishedAt || item.asOfDate || "";
+  const source = item.source || "";
+  const title = item.title || item.headline || item.name || "";
+  const fact = item.fact || item.note || item.summary || item.content || item.text || "";
+  const relevance = item.relevance || item.implication || item.lpView || "";
+  return `
+    <div class="rounded-md border border-slate-200 bg-slate-50 p-3">
+      <div class="mb-1 flex flex-wrap items-center gap-2 text-[11px] font-bold text-slate-500">
+        <span class="rounded bg-white px-2 py-0.5 text-slate-700">${escapeHtml(date)}</span>
+        <span>${escapeHtml(source)}</span>
+      </div>
+      ${title ? `<div class="text-sm font-extrabold leading-5 text-slate-900">${escapeHtml(title)}</div>` : ""}
+      ${fact ? `<div class="mt-1 text-sm leading-6 text-slate-700">${escapeHtml(fact)}</div>` : ""}
+      ${relevance ? `<div class="mt-1 text-xs leading-5 text-slate-500">관련성: ${escapeHtml(relevance)}</div>` : ""}
+    </div>`;
+}
+
+function renderMarketContext(context = {}) {
+  const trends = asArray(context.trends || context.keyMarketTrends);
+  const newsPolicy = asArray(context.newsPolicy).length
+    ? context.newsPolicy
+    : [...asArray(context.recentEvents), ...asArray(context.policyRegulatoryNotes)];
+  const sources = asArray(context.sources);
+  return `
+    ${context.summary ? `<p class="mb-3 text-sm leading-6 text-slate-700">${escapeHtml(context.summary)}</p>` : ""}
+    <div class="grid gap-3 md:grid-cols-3">
+      <div><div class="mb-2 text-xs font-extrabold text-slate-500">시장 동향</div>${renderMarketEvidenceList(trends)}</div>
+      <div><div class="mb-2 text-xs font-extrabold text-slate-500">뉴스/정책</div>${renderMarketEvidenceList(newsPolicy)}</div>
+      <div><div class="mb-2 text-xs font-extrabold text-slate-500">리스크 신호</div>${renderMarketEvidenceList(context.riskSignals)}</div>
+    </div>
+    ${sources.length ? `<div class="mt-4 border-t border-slate-100 pt-3">
+      <div class="mb-2 text-xs font-extrabold text-slate-500">출처</div>
+      ${renderMarketEvidenceList(sources)}
+    </div>` : ""}
+    ${context.sourceQuality ? `<p class="mt-3 text-xs leading-5 text-slate-500">출처 품질: ${escapeHtml(context.sourceQuality)}</p>` : ""}`;
+}
+
+function renderQuestionsPreview(questions = []) {
+  if (!questions.length) return emptyText();
+  return `<div class="space-y-3">${questions.map((item, index) => `
+    <div class="rounded-lg border border-slate-200 bg-slate-50 p-3">
+      <div class="mb-1 text-xs font-extrabold text-brand-700">Q${index + 1}. ${escapeHtml(item.category || "질문")} · ${escapeHtml(item.importance || "Medium")}</div>
+      <div class="text-sm font-bold leading-6 text-slate-900">${escapeHtml(item.question || "")}</div>
+      ${item.rationale ? `<div class="mt-1 text-xs leading-5 text-slate-500">${escapeHtml(item.rationale)}</div>` : ""}
+    </div>`).join("")}</div>`;
+}
+
+function renderQuestions() {
+  const list = $("questionList");
+  const questions = state.questionRecords || [];
+  $("questionCount").textContent = `${questions.length}개`;
+  if (!questions.length) {
+    list.innerHTML = `<div class="rounded-lg border border-dashed border-slate-300 bg-white p-5 text-center text-sm text-slate-500">사전 브리프를 만들면 질문 카드가 자동 생성됩니다.</div>`;
+    return;
+  }
+  list.innerHTML = questions.map((q, index) => `
+    <button class="question-card w-full text-left ${index === state.selectedQuestionIndex ? "selected" : ""}" data-question-index="${index}">
+      <div class="meta">Q${index + 1}. ${escapeHtml(q.category)} · ${escapeHtml(q.importance)}</div>
+      <p>${escapeHtml(q.question)}</p>
+      <div class="mt-3 flex items-center gap-2 text-xs text-slate-500">
+        ${q.answerRecord.answer?.trim() ? `<span class="rounded bg-slate-100 px-2 py-1 font-bold">답변 기록</span>` : ""}
+        ${q.answerRecord.followUpNeeded ? `<span class="rounded bg-amber-100 px-2 py-1 font-bold text-amber-700">추가 검토</span>` : ""}
+      </div>
+    </button>`).join("");
+  list.querySelectorAll("[data-question-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedQuestionIndex = Number(button.dataset.questionIndex);
+      renderQuestions();
+      renderSelectedQuestion();
+      saveState();
+    });
+  });
+}
+
+function renderSelectedQuestion() {
+  const panel = $("selectedQuestionPanel");
+  const q = state.questionRecords[state.selectedQuestionIndex];
+  if (!q) {
+    panel.innerHTML = `<div class="py-12 text-center text-sm text-slate-500">선택된 질문이 없습니다.</div>`;
+    return;
+  }
+  panel.innerHTML = `
+    <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <div class="text-xs font-extrabold uppercase text-brand-700">Q${state.selectedQuestionIndex + 1}. ${escapeHtml(q.category)} · ${escapeHtml(q.importance)}</div>
+        <h3 class="mt-2 text-lg font-extrabold leading-7 text-slate-900">${escapeHtml(q.question)}</h3>
+        ${q.rationale ? `<p class="mt-2 text-sm leading-6 text-slate-500">${escapeHtml(q.rationale)}</p>` : ""}
+      </div>
+    </div>
+    <div class="grid gap-4">
+      <label class="field-label">운용사 답변
+        <textarea id="gpAnswer" class="field-control min-h-36" placeholder="운용사 답변을 질문별로 기록하세요.">${escapeHtml(q.answerRecord.answer)}</textarea>
+      </label>
+      <label class="field-label">내부 메모
+        <textarea id="internalMemo" class="field-control min-h-28" placeholder="LP 내부 판단, 추가 검토 의견, 우려사항">${escapeHtml(q.answerRecord.internalMemo)}</textarea>
+      </label>
+      <label class="field-label">중요 발언
+        <input id="importantQuote" class="field-control" type="text" value="${escapeAttribute(q.answerRecord.importantQuote)}" placeholder="인용하거나 원문 대조할 발언">
+      </label>
+      <label class="inline-flex items-center gap-2 text-sm font-bold text-slate-700">
+        <input id="followUpNeeded" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-brand-600" ${q.answerRecord.followUpNeeded ? "checked" : ""}>
+        추가 검토 필요
+      </label>
+    </div>`;
+
+  ["gpAnswer", "internalMemo", "importantQuote", "followUpNeeded"].forEach((id) => {
+    $(id).addEventListener("input", updateSelectedQuestionRecord);
+    $(id).addEventListener("change", updateSelectedQuestionRecord);
+  });
+}
+
+function updateSelectedQuestionRecord() {
+  const q = state.questionRecords[state.selectedQuestionIndex];
+  if (!q) return;
+  const nextRecord = {
+    answer: $("gpAnswer").value,
+    internalMemo: $("internalMemo").value,
+    importantQuote: $("importantQuote").value,
+    followUpNeeded: $("followUpNeeded").checked
+  };
+  q.answerRecord = {
+    status: deriveAnswerRecordStatus(nextRecord),
+    ...nextRecord
+  };
+  saveState();
+  scheduleExistingLibraryUpdate();
+  renderQuestions();
+}
+
+function addQuestion() {
+  state.questionRecords.push({
+    id: crypto.randomUUID ? crypto.randomUUID() : `q-${Date.now()}`,
+    category: "사용자 추가",
+    importance: "Medium",
+    question: "새 질문을 입력하세요.",
+    rationale: "",
+    source: "사용자",
+    answerRecord: {
+      status: "미확인",
+      answer: "",
+      internalMemo: "",
+      followUpNeeded: false,
+      importantQuote: ""
+    }
+  });
+  state.selectedQuestionIndex = state.questionRecords.length - 1;
+  saveState();
+  scheduleExistingLibraryUpdate();
+  renderQuestions();
+  renderSelectedQuestion();
+}
+
+function renderReport() {
+  const container = $("reportOutput");
+  if (!state.postMeetingMemo) {
+    container.innerHTML = `
+      <div class="flex flex-col items-center justify-center py-16 text-center text-slate-400">
+        <i data-lucide="file-signature" class="mb-3 h-12 w-12 opacity-50"></i>
+        <p class="text-sm">미팅 기록을 완료한 뒤 최종 보고서를 생성하세요.</p>
+      </div>`;
+    refreshIcons();
+    return;
+  }
+  container.innerHTML = markdownToHtml(buildReportMarkdown());
+  refreshIcons();
+}
+
+function buildReportMarkdown() {
+  const memo = state.postMeetingMemo;
+  if (!memo) return "";
+  const summary = memo.internalReportSummary || {};
+  const oneLineView = formatListItemText(summary.oneLineView) || "확인 필요";
+  const investmentMemo = formatListItemText(summary.investmentMemo) || "확인 필요";
+  const riskView = formatListItemText(summary.riskView) || "확인 필요";
+  return `# ${state.meeting.managerName || "운용사"} / ${state.meeting.fundName || "건명"} 미팅 정리
+
+## 1. 논점별 회의록
+${asArray(memo.issueBasedMeetingNotes).map((item) => `- **${formatListItemText(item.issue) || "논점"}**: ${formatListItemText(item.summary) || ""}${item.evidence ? `\n  - 근거: ${formatListItemText(item.evidence)}` : ""}`).join("\n") || "- 확인 필요"}
+
+## 2. 미해결 쟁점
+${listMarkdown(memo.unresolvedIssues)}
+
+## 3. Follow-up Request
+${listMarkdown(asArray(memo.followUpRequestList).slice(0, 3))}
+
+## 4. 운용사 이메일 초안
+${memo.followUpEmailDraft || "확인 필요"}
+
+## 5. 내부 보고용 간이보고서
+**한 줄 의견:** ${oneLineView}
+
+${investmentMemo}
+
+**리스크 관점:** ${riskView}
+
+## 6. Next Action Items
+${listMarkdown(memo.nextActionItems)}
+
+## 7. Quality Checks
+${listMarkdown(memo.qualityChecks)}
+
+## 8. 원문 대조 필요 항목
+${listMarkdown(memo.sourceVerificationItems)}
+`;
+}
+
+function getReportToneConfig(toneValue = "neutral") {
+  const configs = {
+    neutral: {
+      label: "중립적 리뷰",
+      reviewOpinion: "추가 DD 필요",
+      status: "추가 DD 필요",
+      promptInstruction: "장점과 리스크를 균형 있게 쓰고, 판단을 유보할 부분은 확인 필요로 남깁니다."
+    },
+    positive: {
+      label: "긍정적 검토",
+      reviewOpinion: "조건부 긍정",
+      status: "조건부 검토 지속",
+      promptInstruction: "투자 적합성과 긍정 요소를 먼저 정리하되, 투심 상정 전 확인할 조건을 명확히 둡니다."
+    },
+    conservative: {
+      label: "보수적 리스크 강조",
+      reviewOpinion: "보수적 검토",
+      status: "추가 DD 필요",
+      promptInstruction: "downside, 원문 대조 필요 항목, 미해결 쟁점을 앞세우고 보수적인 문장으로 작성합니다."
+    }
+  };
+  return configs[toneValue] || configs.neutral;
+}
+
+function getQuestionRecordsForReport() {
+  return (state.questionRecords || []).map((question, index) => ({
+    no: index + 1,
+    category: question.category || "",
+    importance: question.importance || "",
+    question: question.question || "",
+    rationale: question.rationale || "",
+    gpAnswer: question.answerRecord?.answer || "",
+    internalMemo: question.answerRecord?.internalMemo || "",
+    importantQuote: question.answerRecord?.importantQuote || "",
+    needsFurtherReview: Boolean(question.answerRecord?.followUpNeeded)
+  }));
+}
+
+function buildDocxMemoData() {
+  const memo = state.postMeetingMemo || {};
+  const tone = getReportToneConfig(state.reportTone);
+  const questions = (state.questionRecords || []).slice(0, 5);
+  const risks = [
+    ...asArray(state.preMeetingBrief?.keyRisks),
+    ...asArray(memo.unresolvedIssues)
+  ].slice(0, 6);
+  const followUps = asArray(memo.followUpRequestList).length ? memo.followUpRequestList : state.preMeetingBrief?.expectedFollowUpRequests;
+  const snapshot = state.preMeetingBrief?.fundSnapshot || {};
+  const classificationParts = [
+    localizeDisplayTerm(state.meeting.assetClass),
+    localizeDisplayTerm(state.meeting.strategy),
+    localizeDisplayTerm(state.meeting.capitalType)
+  ].filter(Boolean);
+  const data = {
+    title: "LP Meeting Review Memo",
+    managerName: state.meeting.managerName || "운용사 확인 필요",
+    fundName: state.meeting.fundName || "펀드명 / 대출명 확인 필요",
+    contactName: state.meeting.gpParticipants || state.meeting.contactName || "",
+    gpAttendees: state.meeting.gpParticipants || state.meeting.contactName || "",
+    lpAttendees: state.meeting.lpParticipants || "",
+    meetingDate: state.meeting.meetingDate || "",
+    classification: classificationParts.join(" · ") || "분류 확인 필요",
+    targetSize: snapshot.targetSize || snapshot.fundSize || snapshot.commitmentTarget || "",
+    investmentPeriod: snapshot.investmentPeriod || snapshot.term || "",
+    targetReturn: snapshot.targetReturn || snapshot.targetIrr || snapshot.returns || "",
+    commitmentAmount: snapshot.commitmentAmount || snapshot.lpCommitment || "",
+    status: tone.status,
+    reviewOpinion: tone.reviewOpinion,
+    oneLineView: formatListItemText(memo.internalReportSummary?.oneLineView) || "핵심 결론 확인 필요",
+    evidence: deriveExecutiveEvidence(memo),
+    overview: [
+      ["GP / 건명", `${state.meeting.managerName || "확인 필요"} / ${state.meeting.fundName || "확인 필요"}`],
+      ["투자 지역", localizeDisplayTerm(state.meeting.locationType) || "확인 필요"],
+      ["자산군 / 전략", `${localizeDisplayTerm(state.meeting.assetClass) || "확인 필요"} / ${localizeDisplayTerm(state.meeting.strategy) || "확인 필요"}`],
+      ["섹터 / 구조", `${localizeDisplayTerm(state.meeting.sector) || "확인 필요"} / ${localizeDisplayTerm(state.meeting.investmentStructure || state.meeting.capitalType) || "확인 필요"}`],
+      ["딜 / 자산 메모", state.meeting.keyConcerns || "확인 필요"]
+    ],
+    ddq: questions.map((question, index) => ({
+      label: `Q${index + 1}. ${question.category || "DDQ"}`,
+      question: question.question || "질문 확인 필요",
+      answer: question.answerRecord?.answer || question.answerRecord?.internalMemo || question.rationale || "미답변 / 추가 확인 필요"
+    })),
+    risks: risks.length ? risks : ["원문 계약서 및 추가 DD 전까지 핵심 리스크 확인 필요"],
+    followUps: asArray(followUps).slice(0, 3),
+    finalOpinion: formatListItemText(memo.internalReportSummary?.investmentMemo) || "본건은 추가 DD 결과 확인 후 투심 상정 여부를 판단하는 것이 적절함",
+    riskView: formatListItemText(memo.internalReportSummary?.riskView) || "",
+    nextActions: asArray(memo.nextActionItems).slice(0, 6),
+    sourceChecks: asArray(memo.sourceVerificationItems).slice(0, 6)
+  };
+  return normalizeDocxMemoTone(data);
+}
+
+function localizeDisplayTerm(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const exact = DISPLAY_TERM_MAP[text.toLowerCase()];
+  if (exact) return exact;
+  let localized = text;
+  DISPLAY_TERM_REPLACEMENTS.forEach(([pattern, replacement]) => {
+    localized = localized.replace(pattern, replacement);
+  });
+  return localized;
+}
+
+const DISPLAY_TERM_MAP = {
+  "domestic": "국내",
+  "domestic korea": "국내",
+  "korea": "국내",
+  "kr": "국내",
+  "overseas": "해외",
+  "global": "해외",
+  "international": "해외",
+  "real estate": "부동산",
+  "infrastructure": "인프라",
+  "private equity": "사모투자(PE)",
+  "pe": "사모투자(PE)",
+  "private debt": "사모투자(PD)",
+  "pd": "사모투자(PD)",
+  "commodity finance": "상품금융",
+  "development / pf": "개발 / PF",
+  "development/pf": "개발 / PF",
+  "residential / multifamily": "주거 / 멀티패밀리",
+  "residential/multifamily": "주거 / 멀티패밀리",
+  "senior debt": "선순위 대출",
+  "subordinated debt": "후순위 대출",
+  "guarantee / contract": "보증 / 계약",
+  "exit / repayment": "Exit / 상환",
+  "construction / completion": "공사 / 준공",
+  "business plan": "사업성",
+  "stakeholders": "이해관계자",
+  "partially answered": "부분답변",
+  "needs follow-up material": "추가자료 필요",
+  "unconfirmed": "미확인",
+  "equity": "지분",
+  "debt": "대출",
+  "hybrid / mezzanine": "혼합 / 메자닌"
+};
+
+const DISPLAY_TERM_REPLACEMENTS = [
+  [/\bDomestic Korea\b/gi, "국내"],
+  [/\bDomestic\b/gi, "국내"],
+  [/\bKorea\b/gi, "국내"],
+  [/\bOverseas\b/gi, "해외"],
+  [/\bGlobal\b/gi, "해외"],
+  [/\bInternational\b/gi, "해외"],
+  [/\bReal Estate\b/gi, "부동산"],
+  [/\bInfrastructure\b/gi, "인프라"],
+  [/\bPrivate Equity\b/gi, "사모투자(PE)"],
+  [/\bPrivate Debt\b/gi, "사모투자(PD)"],
+  [/\bCommodity Finance\b/gi, "상품금융"],
+  [/\bDevelopment\s*\/\s*PF\b/gi, "개발 / PF"],
+  [/\bResidential\s*\/\s*Multifamily\b/gi, "주거 / 멀티패밀리"],
+  [/\bSenior Debt\b/gi, "선순위 대출"],
+  [/\bSubordinated Debt\b/gi, "후순위 대출"],
+  [/\bGuarantee\s*\/\s*contract\b/gi, "보증 / 계약"],
+  [/\bExit\s*\/\s*repayment\b/gi, "Exit / 상환"],
+  [/\bConstruction\s*\/\s*completion\b/gi, "공사 / 준공"],
+  [/\bBusiness plan\b/gi, "사업성"],
+  [/\bStakeholders\b/gi, "이해관계자"],
+  [/\bPartially answered\b/gi, "부분답변"],
+  [/\bNeeds follow-up material\b/gi, "추가자료 필요"],
+  [/\bUnconfirmed\b/gi, "미확인"],
+  [/\btrigger conditions\b/gi, "발동 조건"],
+  [/\bexclusions\b/gi, "제외 조항"],
+  [/\btake-out loan\b/gi, "Take-out 대출"],
+  [/\btake-out commitment\b/gi, "Take-out 확약"],
+  [/\blease-up\b/gi, "임대율"],
+  [/\bstress case\b/gi, "스트레스 케이스"],
+  [/\bfollow-up package\b/gi, "후속자료 패키지"],
+  [/\blegal review package\b/gi, "법률 검토 패키지"],
+  [/\bconstruction restart\b/gi, "공사 재개"],
+  [/\bcost contingency\b/gi, "비용 예비비"],
+  [/\boriginal agreements\b/gi, "원문 계약서"],
+  [/\bHybrid\s*\/\s*Mezzanine\b/gi, "혼합 / 메자닌"],
+  [/\bEquity\b/gi, "지분"],
+  [/\bDebt\b/gi, "대출"]
+];
+
+function deriveExecutiveEvidence(memo) {
+  const reasons = [];
+  const snapshot = state.preMeetingBrief?.fundSnapshot || {};
+  if (state.meeting.assetClass || state.meeting.strategy) {
+    reasons.push(`${localizeDisplayTerm(state.meeting.assetClass) || "자산군"} / ${localizeDisplayTerm(state.meeting.strategy) || "전략"} 검토 건으로 분류됨`);
+  }
+  if (snapshot.strategy || snapshot.region || snapshot.assetClass) {
+    reasons.push(`IM 기준 투자대상 분류: ${[snapshot.region, snapshot.assetClass, snapshot.strategy].map(localizeDisplayTerm).filter(Boolean).join(" · ")}`);
+  }
+  if (memo.internalReportSummary?.riskView) {
+    reasons.push(formatListItemText(memo.internalReportSummary.riskView));
+  }
+  asArray(state.preMeetingBrief?.redFlags).slice(0, 2).forEach((item) => reasons.push(formatListItemText(item)));
+  return reasons.slice(0, 3).length ? reasons.slice(0, 3) : ["사전 분석 및 미팅 답변 기준으로 추가 DD 필요 항목 확인"];
+}
+
+function normalizeDocxMemoTone(value) {
+  if (Array.isArray(value)) return value.map((item) => normalizeDocxMemoTone(item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, normalizeDocxMemoTone(item)]));
+  }
+  if (typeof value !== "string") return value;
+  return normalizeReportLanguage(value);
+}
+
+function normalizeReportLanguage(value) {
+  return toEumseumStyle(localizeDisplayTerm(value));
+}
+
+function toEumseumStyle(value) {
+  let text = String(value || "").trim();
+  if (!text) return text;
+  const replacements = [
+    [/공유해 주실 수 있습니까\?/g, "공유 가능한지?"],
+    [/확인할 수 있습니까\?/g, "확인 가능한지?"],
+    [/설명해 주실 수 있습니까\?/g, "설명 가능한지?"],
+    [/할 수 있습니까\?/g, "가능한지?"],
+    [/제시해 주십시오/g, "제시 요청"],
+    [/설명해 주십시오/g, "설명 요청"],
+    [/공유해 주십시오/g, "공유 요청"],
+    [/필요합니다(?=\.|,|\n|$)/g, "필요"],
+    [/필요합니다/g, "필요함"],
+    [/확인해야 합니다(?=\.|,|\n|$)/g, "확인 필요"],
+    [/검토해야 합니다(?=\.|,|\n|$)/g, "검토 필요"],
+    [/해야 합니다(?=\.|,|\n|$)/g, "필요"],
+    [/하였습니다(?=\.|,|\n|$)/g, "하였음"],
+    [/했습니다(?=\.|,|\n|$)/g, "했음"],
+    [/합니다(?=\.|,|\n|$)/g, "함"],
+    [/되었습니다(?=\.|,|\n|$)/g, "되었음"],
+    [/됩니다(?=\.|,|\n|$)/g, "됨"],
+    [/있습니다(?=\.|,|\n|$)/g, "있음"],
+    [/없습니다(?=\.|,|\n|$)/g, "없음"],
+    [/입니다(?=\.|,|\n|$)/g, "임"],
+    [/입니다/g, "임"],
+    [/합니다/g, "함"],
+    [/됩니다/g, "됨"]
+  ];
+  replacements.forEach(([pattern, replacement]) => {
+    text = text.replace(pattern, replacement);
+  });
+  return text;
+}
+
+function limitSentences(value, limit = 5) {
+  const text = toEumseumStyle(value);
+  const sentences = text.match(/[^.!?\n]+[.!?]?/g)?.map((item) => item.trim()).filter(Boolean) || [];
+  return (sentences.length ? sentences.slice(0, limit).join(" ") : text).trim();
+}
+
+function formatKoreanDate(value) {
+  if (!value) return "확인 필요";
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  const weekdays = ["일", "월", "화", "수", "목", "금", "토"];
+  return `${date.getFullYear()}년 ${date.getMonth() + 1}월 ${date.getDate()}일(${weekdays[date.getDay()]})`;
+}
+
+function deriveRiskRows(data) {
+  const rows = asArray(data.risks).map((item, index) => {
+    const text = formatListItemText(item);
+    const category = inferRiskCategory(text, index);
+    const severity = index < 2 ? "High" : index < 5 ? "Medium" : "Low";
+    return {
+      category,
+      description: text,
+      severity,
+      view: inferRiskView(text)
+    };
+  });
+  return rows.length ? rows : [{
+    category: "확인 필요",
+    description: "주요 리스크 확인 필요",
+    severity: "High",
+    view: "추가 DD 전 투자 판단 보류 필요"
+  }];
+}
+
+function inferRiskCategory(text, index) {
+  if (/금리|DSCR|이자|금융비용/i.test(text)) return "금리 리스크";
+  if (/Exit|매각|분양|상환|유동성/i.test(text)) return "Exit / 상환";
+  if (/Track|트랙|운용|GP|실적/i.test(text)) return "트랙레코드";
+  if (/공사|준공|시공|건설/i.test(text)) return "공사 / 준공";
+  if (/보증|HUG|담보|계약/i.test(text)) return "계약 / 보증";
+  return ["사업성", "현금흐름", "Alignment", "Key Man", "법무"][index] || "기타";
+}
+
+function inferRiskView(text) {
+  if (/확인|미확인|검증|수령|자료/i.test(text)) return "원문 자료 수령 전 투자 판단 보류 필요";
+  if (/금리|DSCR|이자|금융비용/i.test(text)) return "Stress 시나리오 재검토 요청";
+  if (/Exit|매각|분양|상환/i.test(text)) return "상환 / Exit 경로 구체화 필요";
+  if (/보증|HUG|담보/i.test(text)) return "계약 조건 및 실행 요건 원문 대조 필요";
+  return "추가 DDQ 회신 후 재검토 필요";
+}
+
+function stripFollowUpMetadata(text) {
+  return String(text || "")
+    .replace(/\s*(담당|owner|기한|due|상태|status)\s*[:：]\s*[^/|,\n;]+/gi, "")
+    .replace(/\s*\/\s*(담당|owner|기한|due|상태|status)\s*[:：]?\s*[^/|,\n;]+/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([,.;])/g, "$1")
+    .trim();
+}
+
+function deriveFollowUpRows(data) {
+  const primaryItems = asArray(data.followUps).filter(Boolean);
+  const fallbackItems = [
+    ...asArray(data.nextActions),
+    ...asArray(data.sourceChecks).map((item) => `원문 대조: ${formatListItemText(item)}`)
+  ].filter(Boolean);
+  const items = (primaryItems.length ? primaryItems : fallbackItems).slice(0, 3);
+  const rows = items.map((item) => ({
+    item: stripFollowUpMetadata(formatListItemText(item)),
+    owner: "",
+    due: ""
+  })).filter((row) => row.item);
+  return rows.length ? rows : [{
+    item: "원문 계약서 및 추가 DD 자료 확인",
+    owner: "",
+    due: ""
+  }];
+}
+
+function inferFollowUpOwner(text) {
+  if (/내부|당사|자체|법무법인|준법|결재/i.test(text)) return "당사";
+  if (/협의|조건|약정|조항/i.test(text)) return "양측 협의";
+  return "GP";
+}
+
+function buildFullMarkdown() {
+  return `# LP Meeting Copilot
+
+## 세팅값
+${Object.entries(state.meeting).map(([key, value]) => `- ${labelize(key)}: ${value || "확인 필요"}`).join("\n")}
+
+## 사전 브리프
+${state.preMeetingBrief ? JSON.stringify(state.preMeetingBrief, null, 2) : "아직 생성되지 않았습니다."}
+
+## 미팅 중 기록
+${state.questionRecords.map((q, index) => `### Q${index + 1}. ${q.question}
+- 운용사 답변: ${q.answerRecord.answer || "미입력"}
+- 내부 메모: ${q.answerRecord.internalMemo || "미입력"}
+- 추가 검토 필요: ${q.answerRecord.followUpNeeded ? "예" : "아니오"}`).join("\n\n")}
+
+## 자유 메모
+${state.meetingNotes || "미입력"}
+
+## Transcript
+${state.transcript || "미입력"}
+
+## 최종 보고서
+${buildReportMarkdown() || "아직 생성되지 않았습니다."}
+`;
+}
+
+function exportMarkdown() {
+  const content = buildFullMarkdown();
+  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${safeFileName(state.meeting.managerName || "meeting")}-${safeFileName(state.meeting.fundName || "copilot")}.md`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+async function exportReportDocx() {
+  if (!state.postMeetingMemo) {
+    toast("먼저 최종 보고서를 생성해주세요.");
+    return;
+  }
+  try {
+    const data = buildDocxMemoData();
+    const blob = await createDocxBlob(data);
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${safeFileName(data.managerName)}-${safeFileName(data.fundName)}-review-memo.docx`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    toast("DOCX 보고서를 내보냈습니다.");
+  } catch (error) {
+    toast(`DOCX 생성 실패: ${error.message}`);
+  }
+}
+
+async function createDocxBlob(data) {
+  const zip = await createDocxFromFinalTemplate(data);
+  return new Blob([zip], {
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  });
+}
+
+async function createDocxFromFinalTemplate(data) {
+  try {
+    const templateBytes = await loadFinalDocxTemplateBytes();
+    const files = await readZipArchive(templateBytes);
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    const documentXmlText = decoder.decode(files["word/document.xml"]);
+    files["word/document.xml"] = encoder.encode(applyFinalWantedTemplate(documentXmlText, data));
+    return createZipArchive(files);
+  } catch (error) {
+    console.warn("DOCX template fetch failed. Falling back to generated DOCX.", error);
+    return createDocxFromGeneratedDocument(data);
+  }
+}
+
+async function loadFinalDocxTemplateBytes() {
+  try {
+    const response = await fetch(DOCX_FINAL_TEMPLATE_URL);
+    if (!response.ok) throw new Error(`템플릿 응답 오류: ${response.status}`);
+    return new Uint8Array(await response.arrayBuffer());
+  } catch (error) {
+    throw new Error(`DOCX_FINAL_WANTED.docx 템플릿을 불러오지 못했습니다. ${error.message || error}`);
+  }
+}
+
+async function createDocxFromGeneratedDocument(data) {
+  return createZipArchive({
+    "[Content_Types].xml": contentTypesXml(),
+    "_rels/.rels": packageRelsXml(),
+    "word/document.xml": documentXml(data),
+    "word/styles.xml": stylesXml(),
+    "word/_rels/document.xml.rels": documentRelsXml()
+  });
+}
+
+async function copyText(text, message) {
+  if (!text) return toast("복사할 내용이 없습니다.");
+  await navigator.clipboard.writeText(text);
+  toast(message);
+}
+
+async function createZipArchive(files) {
+  const encoder = new TextEncoder();
+  const entries = Object.entries(files).map(([name, content]) => {
+    const data = typeof content === "string" ? encoder.encode(content) : content;
+    const crc = crc32(data);
+    return { name, data, crc };
+  });
+  let offset = 0;
+  const localParts = [];
+  const centralParts = [];
+  entries.forEach((entry) => {
+    const nameBytes = encoder.encode(entry.name);
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const localView = new DataView(localHeader.buffer);
+    localView.setUint32(0, 0x04034b50, true);
+    localView.setUint16(4, 20, true);
+    localView.setUint16(6, 0, true);
+    localView.setUint16(8, 0, true);
+    localView.setUint16(10, 0, true);
+    localView.setUint16(12, 0, true);
+    localView.setUint32(14, entry.crc, true);
+    localView.setUint32(18, entry.data.length, true);
+    localView.setUint32(22, entry.data.length, true);
+    localView.setUint16(26, nameBytes.length, true);
+    localHeader.set(nameBytes, 30);
+    localParts.push(localHeader, entry.data);
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    const centralView = new DataView(centralHeader.buffer);
+    centralView.setUint32(0, 0x02014b50, true);
+    centralView.setUint16(4, 20, true);
+    centralView.setUint16(6, 20, true);
+    centralView.setUint16(8, 0, true);
+    centralView.setUint16(10, 0, true);
+    centralView.setUint16(12, 0, true);
+    centralView.setUint16(14, 0, true);
+    centralView.setUint32(16, entry.crc, true);
+    centralView.setUint32(20, entry.data.length, true);
+    centralView.setUint32(24, entry.data.length, true);
+    centralView.setUint16(28, nameBytes.length, true);
+    centralView.setUint32(42, offset, true);
+    centralHeader.set(nameBytes, 46);
+    centralParts.push(centralHeader);
+    offset += localHeader.length + entry.data.length;
+  });
+  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const end = new Uint8Array(22);
+  const endView = new DataView(end.buffer);
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(8, entries.length, true);
+  endView.setUint16(10, entries.length, true);
+  endView.setUint32(12, centralSize, true);
+  endView.setUint32(16, offset, true);
+  return concatUint8Arrays([...localParts, ...centralParts, end]);
+}
+
+async function readZipArchive(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const decoder = new TextDecoder();
+  const eocdOffset = findEndOfCentralDirectory(view);
+  const entryCount = view.getUint16(eocdOffset + 10, true);
+  const centralOffset = view.getUint32(eocdOffset + 16, true);
+  const files = {};
+  let offset = centralOffset;
+  for (let index = 0; index < entryCount; index += 1) {
+    if (view.getUint32(offset, true) !== 0x02014b50) throw new Error("DOCX 중앙 디렉터리를 읽지 못했습니다.");
+    const method = view.getUint16(offset + 10, true);
+    const compressedSize = view.getUint32(offset + 20, true);
+    const fileNameLength = view.getUint16(offset + 28, true);
+    const extraLength = view.getUint16(offset + 30, true);
+    const commentLength = view.getUint16(offset + 32, true);
+    const localOffset = view.getUint32(offset + 42, true);
+    const nameBytes = bytes.slice(offset + 46, offset + 46 + fileNameLength);
+    const name = decoder.decode(nameBytes);
+
+    if (view.getUint32(localOffset, true) !== 0x04034b50) throw new Error("DOCX 로컬 파일 헤더를 읽지 못했습니다.");
+    const localNameLength = view.getUint16(localOffset + 26, true);
+    const localExtraLength = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const compressed = bytes.slice(dataStart, dataStart + compressedSize);
+    files[name] = method === 0 ? compressed : await inflateRawBytes(compressed, method);
+    offset += 46 + fileNameLength + extraLength + commentLength;
+  }
+  return files;
+}
+
+function findEndOfCentralDirectory(view) {
+  const minOffset = Math.max(0, view.byteLength - 65558);
+  for (let offset = view.byteLength - 22; offset >= minOffset; offset -= 1) {
+    if (view.getUint32(offset, true) === 0x06054b50) return offset;
+  }
+  throw new Error("DOCX 파일 구조를 읽지 못했습니다.");
+}
+
+async function inflateRawBytes(bytes, method) {
+  if (method !== 8) throw new Error(`지원하지 않는 DOCX 압축 방식입니다: ${method}`);
+  if (typeof require === "function") {
+    const zlib = require("zlib");
+    return new Uint8Array(zlib.inflateRawSync(Buffer.from(bytes)));
+  }
+  if (typeof DecompressionStream !== "undefined") {
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+  throw new Error("현재 브라우저에서 DOCX 압축 해제를 지원하지 않습니다.");
+}
+
+function concatUint8Arrays(parts) {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  parts.forEach((part) => {
+    merged.set(part, offset);
+    offset += part.length;
+  });
+  return merged;
+}
+
+function crc32(bytes) {
+  const table = crc32.table || (crc32.table = Array.from({ length: 256 }, (_, index) => {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    return value >>> 0;
+  }));
+  let crc = 0xffffffff;
+  for (let index = 0; index < bytes.length; index += 1) crc = table[(crc ^ bytes[index]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function contentTypesXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>`;
+}
+
+function packageRelsXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+}
+
+function documentRelsXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`;
+}
+
+function stylesXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+    <w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>
+    <w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Malgun Gothic"/><w:color w:val="1E293B"/><w:sz w:val="19"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Title">
+    <w:name w:val="Title"/>
+    <w:pPr><w:jc w:val="center"/><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>
+    <w:rPr><w:b/><w:color w:val="0F172A"/><w:sz w:val="32"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="SmallMuted">
+    <w:name w:val="SmallMuted"/>
+    <w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Malgun Gothic"/><w:color w:val="64748B"/><w:sz w:val="17"/></w:rPr>
+  </w:style>
+</w:styles>`;
+}
+
+function applyFinalWantedTemplate(templateXml, data) {
+  let xml = templateXml;
+  xml = replaceTemplateLiteral(xml, "{{자산명}} 검토 메모", `${assetNameForMemoTitle(data.fundName)} 검토 메모`);
+  xml = replaceTemplateLiteral(xml, "본 메모는 투자 결정을 위한 내부 검토 자료이며, 외부 유출이 엄격히 금지됩니다.", "본 메모는 투자 결정을 위한 내부 검토 자료이며, 외부 유출이 엄격히 금지됨.");
+
+  const tables = getXmlBlocks(xml, "tbl");
+  if (tables.length < 11) throw new Error("DOCX_FINAL_WANTED.docx 템플릿 표 구조를 확인하지 못했습니다.");
+
+  const updatedTables = [...tables];
+  updatedTables[1] = fillTemplateSummaryTable(tables[1], data);
+  updatedTables[3] = fillTemplateOverviewTable(tables[3], data);
+  updatedTables[6] = fillTemplateDdqTable(tables[6], data, 5);
+  updatedTables[8] = fillTemplateRiskTable(tables[8], data, 6);
+  updatedTables[10] = fillTemplateFollowUpTable(tables[10], data, 8);
+
+  updatedTables.forEach((table, index) => {
+    if (table !== tables[index]) xml = replaceXmlBlockAt(xml, "tbl", index, table);
+  });
+
+  const opinions = deriveTemplateOpinionLines(data, 5);
+  TEMPLATE_OPINION_TEXTS.forEach((text, index) => {
+    xml = replaceTemplateLiteral(xml, text, opinions[index] || "");
+  });
+  return xml;
+}
+
+function assetNameForMemoTitle(value) {
+  return String(value || "자산명 확인 필요").replace(/\s*검토\s*$/g, "").trim() || "자산명 확인 필요";
+}
+
+function fillTemplateSummaryTable(tableXml, data) {
+  const lines = [
+    `펀드명 / 대출명: ${data.fundName || "확인 필요"}`,
+    `운용사(GP): ${data.managerName || "확인 필요"}`,
+    `미팅일자: ${formatKoreanDate(data.meetingDate)}`,
+    `검토 결과: ${data.reviewOpinion || "확인 필요"}`,
+    `심사역 의견: ${limitSentences(data.finalOpinion || data.oneLineView || "추가 DD 필요", 2)}`
+  ];
+  return setSingleRowTableCells(tableXml, [lines]);
+}
+
+function fillTemplateOverviewTable(tableXml, data) {
+  const overview = Object.fromEntries(data.overview || []);
+  const rows = [
+    ["미팅 일시", formatKoreanDate(data.meetingDate)],
+    ["장소", "확인 필요"],
+    ["GP 참석자", data.gpAttendees || data.contactName || "확인 필요"],
+    ["당사 참석자", data.lpAttendees || `${profile.name || "담당자 확인 필요"} / ${profile.department || "부서 확인 필요"}`],
+    ["지역 / 분류", [overview["투자 지역"], data.classification].filter(Boolean).join(" / ") || "확인 필요"],
+    ["운용 목표 규모", data.targetSize || "확인 필요"],
+    ["투자 기간", data.investmentPeriod || "확인 필요"],
+    ["목표 수익률", data.targetReturn || "확인 필요"],
+    ["당사 검토 약정액", data.commitmentAmount || "확인 필요"]
+  ];
+  return setExistingTableRows(tableXml, rows, { normalizeValueCells: true });
+}
+
+function fillTemplateDdqTable(tableXml, data, limit) {
+  const rows = asArray(data.ddq).slice(0, limit);
+  const ddqRows = (rows.length ? rows : [{ question: "핵심 질의 확인 필요", answer: "미답변 / 추가 확인 필요" }]).map((item, index) => [
+    `Q${index + 1}`,
+    normalizeReportLanguage(item.question || "질문 확인 필요"),
+    normalizeReportLanguage(item.answer || "미답변 / 추가 확인 필요")
+  ]);
+  return rebuildTableWithDataRows(tableXml, ddqRows);
+}
+
+function fillTemplateRiskTable(tableXml, data, limit) {
+  const rows = deriveRiskRows(data).slice(0, limit).map((row) => [
+    row.category,
+    row.description,
+    row.severity,
+    row.view
+  ]);
+  return rebuildTableWithDataRows(tableXml, rows);
+}
+
+function fillTemplateFollowUpTable(tableXml, data, limit) {
+  const rows = deriveFollowUpRows(data).slice(0, limit).map((row, index) => [
+    `F-${String(index + 1).padStart(2, "0")}`,
+    row.item,
+    row.owner,
+    row.due,
+    row.status
+  ]);
+  return rebuildTableWithDataRows(tableXml, rows);
+}
+
+function deriveTemplateOpinionLines(data, limit) {
+  const lines = [
+    data.oneLineView,
+    ...asArray(data.evidence),
+    data.riskView,
+    data.finalOpinion
+  ].filter(Boolean).map((item) => limitSentences(formatListItemText(item), 2));
+  return lines.slice(0, limit);
+}
+
+const TEMPLATE_OPINION_TEXTS = [
+  "GP의 인프라 섹터 운용 경험은 업계 평균 대비 양호한 수준으로 판단되나, Fund III 기준 트랙레코드(Realized Deal 실적)가 미흡하여 Net IRR 추정치의 신뢰성 검증 필요.",
+  "목표 LTV 60% 수준은 현행 고금리 환경(기준금리 3.5%)하 이자비용 부담이 상당하며, Debt Service Coverage Ratio(DSCR) 안전마진이 과거 펀드 대비 축소된 것으로 추정됨.",
+  "주요 포트폴리오 자산 3건 중 2건이 사회인프라(가용성 기반, Availability-based)이나, 나머지 1건은 Merchant 방식으로 현금흐름 변동성 요인이 혼재 — 섹터 일관성 우려.",
+  "Carried Interest 20% / Hurdle Rate 7% 구조는 업계 표준 범위이나, GP-LP 이해관계 정렬(Alignment of Interest) 측면에서 GP 공동투자(Co-investment) 규모 확인 필요.",
+  "전반적으로 당사 대체투자 가이드라인 부합 여부 검토 중이며, 추가 DDQ 회신 및 독립적 재무모델 검증 완료 시 Pre-IC 상정 가능한 것으로 판단됨."
+];
+
+function getXmlBlocks(xml, tagName) {
+  return xml.match(new RegExp(`<w:${tagName}\\b[\\s\\S]*?</w:${tagName}>`, "g")) || [];
+}
+
+function replaceXmlBlockAt(xml, tagName, index, replacement) {
+  let current = -1;
+  return xml.replace(new RegExp(`<w:${tagName}\\b[\\s\\S]*?</w:${tagName}>`, "g"), (match) => {
+    current += 1;
+    return current === index ? replacement : match;
+  });
+}
+
+function replaceTemplateLiteral(xml, sourceText, nextText) {
+  return xml.replace(escapeXml(sourceText), escapeXml(toEumseumStyle(nextText)));
+}
+
+function setSingleRowTableCells(tableXml, cellValues) {
+  const rows = getXmlBlocks(tableXml, "tr");
+  if (!rows.length) return tableXml;
+  const row = setRowCellTexts(rows[0], cellValues);
+  return setTableRows(tableXml, [row]);
+}
+
+function setExistingTableRows(tableXml, rowValues, options = {}) {
+  const rows = getXmlBlocks(tableXml, "tr");
+  const updatedRows = rows.map((row, index) => {
+    const values = rowValues[index];
+    return values ? setRowCellTexts(row, values, options) : row;
+  });
+  return setTableRows(tableXml, updatedRows);
+}
+
+function rebuildTableWithDataRows(tableXml, rowValues) {
+  const rows = getXmlBlocks(tableXml, "tr");
+  if (!rows.length) return tableXml;
+  const header = rows[0];
+  const dataTemplate = rows[1] || rows[0];
+  const nextRows = [header, ...rowValues.map((values) => setRowCellTexts(dataTemplate, values))];
+  return setTableRows(tableXml, nextRows);
+}
+
+function setTableRows(tableXml, rows) {
+  const existingRows = getXmlBlocks(tableXml, "tr");
+  if (!existingRows.length) return tableXml;
+  const firstRow = existingRows[0];
+  const lastRow = existingRows[existingRows.length - 1];
+  const prefix = tableXml.slice(0, tableXml.indexOf(firstRow));
+  const suffix = tableXml.slice(tableXml.indexOf(lastRow) + lastRow.length);
+  return `${prefix}${rows.join("")}${suffix}`;
+}
+
+function setRowCellTexts(rowXml, values, options = {}) {
+  const cells = getXmlBlocks(rowXml, "tc");
+  let next = rowXml;
+  cells.forEach((cell, index) => {
+    const value = values[index] ?? "";
+    const cellOptions = options.normalizeValueCells && index > 0 ? { normalizeRun: true } : {};
+    next = next.replace(cell, setCellText(cell, value, cellOptions));
+  });
+  return next;
+}
+
+function setCellText(cellXml, value, options = {}) {
+  const start = cellXml.match(/^<w:tc\b[^>]*>/)?.[0] || "<w:tc>";
+  const tcPr = cellXml.match(/<w:tcPr[\s\S]*?<\/w:tcPr>/)?.[0] || "";
+  const paragraphs = getXmlBlocks(cellXml, "p");
+  const templateParagraph = paragraphs[0] || "<w:p><w:r><w:t></w:t></w:r></w:p>";
+  const lines = Array.isArray(value) ? value : String(value || "").split("\n");
+  const paragraphXml = (lines.length ? lines : [""]).map((line) => setParagraphXmlText(templateParagraph, line, options)).join("");
+  return `${start}${tcPr}${paragraphXml}</w:tc>`;
+}
+
+function setParagraphXmlText(paragraphXml, value, options = {}) {
+  const text = toEumseumStyle(typeof value === "object" ? value.text : value);
+  const start = paragraphXml.match(/^<w:p\b[^>]*>/)?.[0] || "<w:p>";
+  const pPr = paragraphXml.match(/<w:pPr[\s\S]*?<\/w:pPr>/)?.[0] || "";
+  const rPr = options.normalizeRun ? normalizedTableValueRunPr() : paragraphXml.match(/<w:rPr[\s\S]*?<\/w:rPr>/)?.[0] || "";
+  if (!String(text || "").trim()) return `${start}${pPr}</w:p>`;
+  return `${start}${pPr}<w:r>${rPr}<w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r></w:p>`;
+}
+
+function normalizedTableValueRunPr() {
+  return '<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Malgun Gothic"/><w:color w:val="1F2937"/><w:sz w:val="18"/></w:rPr>';
+}
+
+function documentXml(data) {
+  const body = fullReviewMemoBody(data);
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`;
+}
+
+function fullReviewMemoBody(data) {
+  const body = [
+    finalWantedTitleBlock(data),
+    finalWantedSectionHeader("01", "요약 (Executive Summary)"),
+    finalWantedSummaryTable(data),
+    finalWantedSectionHeader("02", "미팅 개요 (Meeting Overview)"),
+    finalWantedMeetingOverviewTable(data),
+    finalWantedSectionHeader("03", "심사역 검토 의견 (Reviewer's Opinion)"),
+    finalWantedOpinionList(data),
+    finalWantedSectionHeader("04", "핵심 DDQ — 미팅 Q&A 기록"),
+    finalWantedDdqTable(data, 5),
+    finalWantedSectionHeader("05", "주요 예상 리스크 (Key Risk Factors)"),
+    finalWantedRiskTable(data, 6),
+    finalWantedSectionHeader("06", "향후 Follow-up 사항"),
+    finalWantedFollowUpTable(data, 3),
+    finalWantedFooter(),
+    sectionProperties()
+  ].join("");
+  return body;
+}
+
+function documentMetaBlock(data) {
+  return `<w:tbl><w:tblPr>${tableWidth()}<w:tblBorders><w:bottom w:val="single" w:sz="10" w:color="CBD5E1"/></w:tblBorders><w:tblCellMar>${tableMargins(0, 0, 0, 0)}</w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="5600"/><w:gridCol w:w="3760"/></w:tblGrid>
+    <w:tr>
+      ${tableCell("Strictly Confidential · 투자심사본부 대체투자팀", { width: 5600, borders: "none", padding: 0, color: "334155", bold: true, size: 17 })}
+      ${tableCell(`작성일 ${formatDocxDate(new Date())} · ${data.status || "Draft 초안"}`, { width: 3760, borders: "none", align: "right", color: "64748B", size: 17, padding: 0 })}
+    </w:tr>
+  </w:tbl>`;
+}
+
+function titleBlock(data) {
+  const subtitle = [data.managerName, data.classification].filter(Boolean).join(" · ");
+  return [
+    paragraph("LP Meeting Review Memo", { style: "Title", align: "center", bold: true, size: 31, color: "0F172A" }),
+    paragraph(data.fundName || "펀드명 / 대출명 확인 필요", { align: "center", bold: true, size: 23, color: "334155" }),
+    paragraph(subtitle || "운용사 및 투자 분류 확인 필요", { align: "center", size: 18, color: "64748B" })
+  ].join("");
+}
+
+function finalWantedTitleBlock(data, options = {}) {
+  const assetName = data.fundName || "자산명 확인 필요";
+  return [
+    paragraph(`${assetName} 검토 메모`, { align: "center", bold: true, size: options.compact ? 28 : 31, color: "0F172A" }),
+    paragraph("GP Meeting Review Memo", { align: "center", bold: true, size: 18, color: "64748B" })
+  ].join("");
+}
+
+function finalWantedSectionHeader(number, title) {
+  return finalWantedTable([520, 8840], `
+    <w:tr>
+      ${tableCell(number, { width: 520, fill: "0F172A", color: "FFFFFF", bold: true, align: "center", size: 18 })}
+      ${tableCell(title, { width: 8840, fill: "F1F5F9", color: "0F172A", bold: true, size: 20 })}
+    </w:tr>
+  `, { topSize: 0, bottomSize: 0, cellMargin: tableMargins(80, 120, 80, 120) });
+}
+
+function finalWantedSummaryTable(data) {
+  const lines = [
+    `펀드명 / 대출명: ${data.fundName || "확인 필요"}`,
+    `운용사(GP): ${data.managerName || "확인 필요"}`,
+    `미팅일자: ${formatKoreanDate(data.meetingDate)}`,
+    `검토 결과: ${data.reviewOpinion || "확인 필요"}`,
+    `심사역 의견: ${limitSentences(data.finalOpinion || data.oneLineView || "추가 DD 필요", 2)}`
+  ].map((text) => ({ text }));
+  return finalWantedTable([9360], `<w:tr>${tableCell(lines, { width: 9360, fill: "F8FAFC" })}</w:tr>`, {
+    cellMargin: tableMargins(120, 150, 120, 150)
+  });
+}
+
+function finalWantedMeetingOverviewTable(data, options = {}) {
+  const overview = Object.fromEntries(data.overview || []);
+  const rows = [
+    ["미팅 일시", formatKoreanDate(data.meetingDate)],
+    ["장소", "확인 필요"],
+    ["GP 참석자", data.gpAttendees || data.contactName || "확인 필요"],
+    ["당사 참석자", data.lpAttendees || `${profile.name || "담당자 확인 필요"} / ${profile.department || "부서 확인 필요"}`],
+    ["지역 / 분류", [overview["투자 지역"], data.classification].filter(Boolean).join(" / ") || "확인 필요"],
+    ["운용 목표 규모", data.targetSize || "확인 필요"],
+    ["투자 기간", data.investmentPeriod || "확인 필요"],
+    ["목표 수익률", data.targetReturn || "확인 필요"],
+    ["당사 검토 약정액", data.commitmentAmount || "확인 필요"]
+  ];
+  const visibleRows = options.compact ? rows.slice(0, 6) : rows;
+  return finalWantedTable([1700, 7660], visibleRows.map(([label, value]) => `
+    <w:tr>
+      ${tableCell(label, { width: 1700, fill: "F8FAFC", bold: true, color: "334155", align: "center" })}
+      ${tableCell(value, { width: 7660 })}
+    </w:tr>
+  `).join(""));
+}
+
+function finalWantedOpinionList(data, options = {}) {
+  const opinionItems = [
+    data.oneLineView,
+    ...asArray(data.evidence),
+    data.riskView,
+    data.finalOpinion
+  ].filter(Boolean).map((item) => `• ${limitSentences(formatListItemText(item), 2)}`);
+  const limit = options.limit || 5;
+  return opinionItems.slice(0, limit).map((item) => paragraph(item, { indentLeft: 360, hanging: 220, size: 19 })).join("");
+}
+
+function finalWantedDdqTable(data, limit = 5) {
+  const rows = asArray(data.ddq).slice(0, limit);
+  const ddqRows = rows.length ? rows : [{ question: "핵심 질의 확인 필요", answer: "미답변 / 추가 확인 필요" }];
+  return finalWantedTable([620, 3900, 4840], `
+    <w:tr>
+      ${tableCell("No.", { width: 620, fill: "F1F5F9", bold: true, align: "center" })}
+      ${tableCell("GP 측 질문", { width: 3900, fill: "F1F5F9", bold: true, align: "center" })}
+      ${tableCell("GP 답변 요지", { width: 4840, fill: "F1F5F9", bold: true, align: "center" })}
+    </w:tr>
+    ${ddqRows.map((item, index) => `<w:tr>
+      ${tableCell(`Q${index + 1}`, { width: 620, fill: "F8FAFC", bold: true, align: "center" })}
+      ${tableCell(item.question || "질문 확인 필요", { width: 3900 })}
+      ${tableCell(item.answer || "미답변 / 추가 확인 필요", { width: 4840 })}
+    </w:tr>`).join("")}
+  `);
+}
+
+function finalWantedRiskTable(data, limit = 6) {
+  const rows = deriveRiskRows(data).slice(0, limit);
+  return finalWantedTable([1200, 4700, 1050, 2410], `
+    <w:tr>
+      ${tableCell("구분", { width: 1200, fill: "F1F5F9", bold: true, align: "center" })}
+      ${tableCell("리스크 내용", { width: 4700, fill: "F1F5F9", bold: true, align: "center" })}
+      ${tableCell("심각도", { width: 1050, fill: "F1F5F9", bold: true, align: "center" })}
+      ${tableCell("당사 View", { width: 2410, fill: "F1F5F9", bold: true, align: "center" })}
+    </w:tr>
+    ${rows.map((row) => `<w:tr>
+      ${tableCell(row.category, { width: 1200, bold: true, align: "center" })}
+      ${tableCell(row.description, { width: 4700 })}
+      ${tableCell(row.severity, { width: 1050, bold: true, align: "center" })}
+      ${tableCell(row.view, { width: 2410 })}
+    </w:tr>`).join("")}
+  `);
+}
+
+function finalWantedFollowUpTable(data, limit = 3) {
+  const rows = deriveFollowUpRows(data).slice(0, limit);
+  return finalWantedTable([700, 5660, 1500, 1500], `
+    <w:tr>
+      ${tableCell("No.", { width: 700, fill: "F1F5F9", bold: true, align: "center" })}
+      ${tableCell("Follow-up 항목", { width: 5660, fill: "F1F5F9", bold: true, align: "center" })}
+      ${tableCell("담당", { width: 1500, fill: "F1F5F9", bold: true, align: "center" })}
+      ${tableCell("기한", { width: 1500, fill: "F1F5F9", bold: true, align: "center" })}
+    </w:tr>
+    ${rows.map((row, index) => `<w:tr>
+      ${tableCell(`F-${String(index + 1).padStart(2, "0")}`, { width: 700, bold: true, align: "center" })}
+      ${tableCell(row.item, { width: 5660 })}
+      ${tableCell(row.owner, { width: 1500, align: "center" })}
+      ${tableCell(row.due, { width: 1500, align: "center" })}
+    </w:tr>`).join("")}
+  `, { bottomSize: 18 });
+}
+
+function finalWantedFooter() {
+  return [
+    paragraph("본 메모는 투자 결정을 위한 내부 검토 자료이며, 외부 유출이 엄격히 금지됨.", { align: "center", size: 16, color: "64748B" }),
+    paragraph("This document is strictly confidential and intended solely for internal use.", { align: "center", size: 16, color: "64748B" })
+  ].join("");
+}
+
+function finalWantedTable(columns, rowsXml, options = {}) {
+  const cellMargin = options.cellMargin || tableMargins(100, 130, 100, 130);
+  return `<w:tbl><w:tblPr>${tableWidth()}<w:tblLayout w:type="fixed"/><w:tblBorders>${borderXml("CBD5E1", options)}</w:tblBorders><w:tblCellMar>${cellMargin}</w:tblCellMar></w:tblPr><w:tblGrid>${columns.map((width) => `<w:gridCol w:w="${width}"/>`).join("")}</w:tblGrid>${rowsXml}</w:tbl>${spacer(0)}`;
+}
+
+function paragraph(text, options = {}) {
+  const style = options.style ? `<w:pStyle w:val="${options.style}"/>` : "";
+  const align = options.align ? `<w:jc w:val="${options.align}"/>` : "";
+  const indent = options.indentLeft ? `<w:ind w:left="${options.indentLeft}"${options.hanging ? ` w:hanging="${options.hanging}"` : ""}/>` : "";
+  const keepLines = options.keepLines ? "<w:keepLines/>" : "";
+  return `<w:p><w:pPr>${style}${align}${indent}${keepLines}<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>${run(text, Boolean(options.bold), options)}</w:p>`;
+}
+
+function bulletSection(title, items) {
+  return `${paragraph(title)}${bulletList(items)}`;
+}
+
+function bulletList(items) {
+  return asArray(items).filter(Boolean).map((item) => paragraph(`• ${formatListItemText(item)}`)).join("");
+}
+
+function executiveSummaryTable(data) {
+  const evidence = asArray(data.evidence).slice(0, 4).map((item) => ({ text: `• ${formatListItemText(item)}` }));
+  return sectionTable("1. Executive Summary", `
+    <w:tr>${tableCell("검토의견", labelCell())}${tableCell(data.reviewOpinion || "확인 필요", { width: 7660, bold: true, color: "0F172A" })}</w:tr>
+    <w:tr>${tableCell("한 줄 결론", labelCell())}${tableCell(data.oneLineView || "확인 필요", { width: 7660, fill: "F8FAFC", bold: true })}</w:tr>
+    <w:tr>${tableCell("핵심 근거", labelCell())}${tableCell(evidence.length ? evidence : "확인 필요", { width: 7660 })}</w:tr>
+  `);
+}
+
+function investmentOverviewTable(data) {
+  const overview = Object.fromEntries(data.overview || []);
+  const classification = data.classification || "분류 확인 필요";
+  const rows = [
+    ["운용사", data.managerName],
+    ["펀드명 / 대출명", data.fundName],
+    ["자산군", classification],
+    ["투자지역", overview["투자 지역"]],
+    ["섹터 / 구조", overview["섹터 / 구조"]],
+    ["딜 / 자산 메모", overview["딜 / 자산 메모"]]
+  ];
+  return sectionTable("2. 투자 개요", rows.map(([label, value]) => `
+    <w:tr>${tableCell(label, labelCell())}${tableCell(value || "확인 필요", { width: 7660, bold: label !== "딜 / 자산 메모" })}</w:tr>
+  `).join(""));
+}
+
+function opinionTable(data) {
+  return sectionTable("3. 의견", `
+    <w:tr>
+      ${tableCell("종합 의견", labelCell())}
+      ${tableCell(limitSentences(data.finalOpinion || "추가 DD 결과 확인 후 투심 상정 여부 판단 필요", 5), { width: 7660 })}
+    </w:tr>
+  `);
+}
+
+function ddqInsightsTable(data) {
+  const rows = asArray(data.ddq).slice(0, 4);
+  const ddqRows = rows.length ? rows : [{ label: "Q1. DDQ", question: "핵심 질의 확인 필요", answer: "미답변 / 추가 확인 필요" }];
+  return ddqSectionTable("4. 핵심 DDQ", ddqRows.map((item, index) => `
+    <w:tr>
+      ${tableCell(`Q${index + 1}`, ddqLabelCell())}
+      ${tableCell([
+        { text: cleanDocxLabel(item.label || "DDQ"), bold: true, color: "334155", size: 18 },
+        { text: "LP 질의", bold: true, color: "0F172A" },
+        { text: item.question || "질문 확인 필요" },
+        { text: "GP 답변 / 미팅 기록", bold: true, color: "0F172A" },
+        { text: item.answer || "미답변 / 추가 확인 필요", color: "475569" }
+      ], { width: 8600 })}
+    </w:tr>
+  `).join(""));
+}
+
+function riskTableOnly(data) {
+  const risks = asArray(data.risks).slice(0, 6);
+  const riskLines = (risks.length ? risks : ["핵심 리스크 확인 필요"]).map((item, index) => {
+    const level = index < 2 ? "High" : "Medium";
+    return { text: `[${level}] ${formatListItemText(item)}` };
+  });
+  return sectionTable("5. 주요 예상 리스크", `
+    <w:tr>
+      ${tableCell("리스크", labelCell())}
+      ${tableCell(riskLines, { width: 7660 })}
+    </w:tr>
+  `);
+}
+
+function followUpActionTable(data) {
+  const actionItems = [
+    ...asArray(data.followUps),
+    ...asArray(data.nextActions),
+    ...asArray(data.sourceChecks).map((item) => `원문 대조: ${formatListItemText(item)}`)
+  ].slice(0, 8);
+  const followUpLines = (actionItems.length ? actionItems : ["원문 계약서 및 추가 DD 자료 확인"]).map((item) => ({ text: `□ ${formatListItemText(item)}` }));
+  return sectionTable("6. 향후 Follow-up", `
+    <w:tr>
+      ${tableCell("요청 / 액션", labelCell())}
+      ${tableCell(followUpLines, { width: 7660, fill: "F8FAFC" })}
+    </w:tr>
+  `, { bottomSize: 18 });
+}
+
+function sectionTable(title, rowsXml, options = {}) {
+  const cellMargin = options.compact ? tableMargins(70, 120, 70, 120) : tableMargins(105, 145, 105, 145);
+  return `<w:tbl><w:tblPr>${tableWidth()}<w:tblLayout w:type="fixed"/><w:tblBorders>${borderXml("CBD5E1", options)}</w:tblBorders><w:tblCellMar>${cellMargin}</w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="1700"/><w:gridCol w:w="7660"/></w:tblGrid>
+    <w:tr>${tableCell(title, { width: 9360, gridSpan: 2, fill: "F1F5F9", bold: true, color: "0F172A", size: 20 })}</w:tr>
+    ${rowsXml}
+  </w:tbl>${spacer(0)}`;
+}
+
+function ddqSectionTable(title, rowsXml, options = {}) {
+  const cellMargin = options.compact ? tableMargins(70, 120, 70, 120) : tableMargins(105, 145, 105, 145);
+  return `<w:tbl><w:tblPr>${tableWidth()}<w:tblLayout w:type="fixed"/><w:tblBorders>${borderXml("CBD5E1", options)}</w:tblBorders><w:tblCellMar>${cellMargin}</w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="760"/><w:gridCol w:w="8600"/></w:tblGrid>
+    <w:tr>${tableCell(title, { width: 9360, gridSpan: 2, fill: "F1F5F9", bold: true, color: "0F172A", size: 20 })}</w:tr>
+    ${rowsXml}
+  </w:tbl>${spacer(0)}`;
+}
+
+function twoColumnSectionTable(title, rowsXml, options = {}) {
+  const cellMargin = options.compact ? tableMargins(70, 120, 70, 120) : tableMargins(105, 145, 105, 145);
+  return `<w:tbl><w:tblPr>${tableWidth()}<w:tblLayout w:type="fixed"/><w:tblBorders>${borderXml("CBD5E1", options)}</w:tblBorders><w:tblCellMar>${cellMargin}</w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid>
+    <w:tr>${tableCell(title, { width: 9360, gridSpan: 2, fill: "F1F5F9", bold: true, color: "0F172A", size: 20 })}</w:tr>
+    ${rowsXml}
+  </w:tbl>${spacer(0)}`;
+}
+
+function labelCell(extra = {}) {
+  return { width: 1700, fill: "F8FAFC", bold: true, color: "334155", align: "center", ...extra };
+}
+
+function ddqLabelCell(extra = {}) {
+  return { width: 760, fill: "F8FAFC", bold: true, color: "334155", align: "center", ...extra };
+}
+
+function tableCell(content, options = {}) {
+  const width = options.width || 3900;
+  const fill = options.fill || "FFFFFF";
+  const gridSpan = options.gridSpan ? `<w:gridSpan w:val="${options.gridSpan}"/>` : "";
+  const borders = options.borders === "none" ? "<w:tcBorders><w:top w:val=\"nil\"/><w:left w:val=\"nil\"/><w:bottom w:val=\"nil\"/><w:right w:val=\"nil\"/></w:tcBorders>" : "";
+  const padding = options.padding === 0 ? tableMargins(0, 0, 0, 0) : tableMargins(100, 140, 100, 140);
+  return `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/>${gridSpan}<w:shd w:fill="${fill}"/>${borders}<w:tcMar>${padding}</w:tcMar><w:vAlign w:val="center"/></w:tcPr>${cellParagraphs(content, options)}</w:tc>`;
+}
+
+function cellParagraphs(content, options = {}) {
+  if (Array.isArray(content)) {
+    return content.map((item) => {
+      if (typeof item === "string") return paragraph(toEumseumStyle(item), paragraphOptionsForLine(item, options));
+      const text = item.text || "확인 필요";
+      return paragraph(toEumseumStyle(text), paragraphOptionsForLine(text, { ...options, ...item }));
+    }).join("");
+  }
+  return String(content || "확인 필요").split("\n").map((line) => paragraph(toEumseumStyle(line), paragraphOptionsForLine(line, {
+    bold: options.bold,
+    color: options.color,
+    size: options.size,
+    align: options.align
+  }))).join("");
+}
+
+function paragraphOptionsForLine(line, options = {}) {
+  const trimmed = String(line || "").trim();
+  const next = { ...options };
+  if (/^[•□]/.test(trimmed)) {
+    next.indentLeft = next.indentLeft || 360;
+    next.hanging = next.hanging || 220;
+  } else if (/^\[(High|Medium|Low)\]/i.test(trimmed)) {
+    next.indentLeft = next.indentLeft || 300;
+  }
+  return next;
+}
+
+function tableWidth() {
+  return `<w:tblW w:w="9360" w:type="dxa"/><w:tblInd w:w="0" w:type="dxa"/>`;
+}
+
+function tableMargins(top, left, bottom, right) {
+  return `<w:top w:w="${top}" w:type="dxa"/><w:left w:w="${left}" w:type="dxa"/><w:bottom w:w="${bottom}" w:type="dxa"/><w:right w:w="${right}" w:type="dxa"/>`;
+}
+
+function borderXml(color = "CBD5E1", options = {}) {
+  const topSize = options.topSize ?? 14;
+  const bottomSize = options.bottomSize ?? 14;
+  return `<w:top w:val="single" w:sz="${topSize}" w:color="0F172A"/><w:left w:val="single" w:sz="6" w:color="${color}"/><w:bottom w:val="single" w:sz="${bottomSize}" w:color="0F172A"/><w:right w:val="single" w:sz="6" w:color="${color}"/><w:insideH w:val="single" w:sz="6" w:color="${color}"/><w:insideV w:val="single" w:sz="6" w:color="${color}"/>`;
+}
+
+function run(text, bold = false, options = {}) {
+  const size = options.size || 19;
+  const color = options.color || "1E293B";
+  return `<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="Malgun Gothic"/>${bold ? "<w:b/>" : ""}<w:color w:val="${color}"/><w:sz w:val="${size}"/></w:rPr><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`;
+}
+
+function spacer(after = 120) {
+  if (!after) return "";
+  return `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:p>`;
+}
+
+function sectionProperties() {
+  return `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080"/></w:sectPr>`;
+}
+
+function formatDocxDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}. ${month}. ${day}`;
+}
+
+function cleanDocxLabel(value) {
+  return String(value || "DDQ").replace(/^Q\d+\.\s*/, "").replace(/\s+/g, " ").trim();
+}
+
+function escapeXml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function insertTimestamp() {
+  const textarea = $("meetingNotes");
+  const now = new Date();
+  const stamp = `[${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}] `;
+  const insertion = `${textarea.value ? "\n" : ""}${stamp}`;
+  textarea.value += insertion;
+  textarea.focus();
+  syncFieldsToState();
+  saveState();
+  scheduleExistingLibraryUpdate();
+}
+
+function saveCurrentMeeting(message = "최근 미팅에 저장했습니다.") {
+  syncFieldsToState();
+  saveState();
+  if (!localMeetingStorageEnabled) {
+    showRecentMeetingFeedback("로컬 저장이 꺼져 있어 현재 미팅을 브라우저에 저장하지 않았습니다.");
+    toast("로컬 저장이 꺼져 있습니다.");
+    return;
+  }
+  saveMeetingToLibrary();
+  showRecentMeetingFeedback(message);
+  toast(message);
+}
+
+function saveMeetingToLibrary() {
+  if (!localMeetingStorageEnabled) return;
+  const library = getLibrary();
+  if (!state.meetingId) state.meetingId = createMeetingId();
+  const id = state.meetingId;
+  const item = {
+    id,
+    managerName: state.meeting.managerName || "운용사 미정",
+    fundName: state.meeting.fundName || "펀드명 / 대출명 미정",
+    updatedAt: new Date().toISOString(),
+    status: state.postMeetingMemo ? "보고서 완료" : state.preMeetingBrief ? "브리프 완료" : "작성 중",
+    selectedFileName: state.selectedFileName || "",
+    snapshot: sanitizeStateForStorage({ ...state, meetingId: id })
+  };
+  const next = [item, ...library.filter((entry) => entry.id !== id)].slice(0, 8);
+  localStorage.setItem(LIBRARY_KEY, JSON.stringify(next));
+  saveState();
+  renderRecentMeetings();
+  showRecentMeetingFeedback(`${item.fundName} 저장됨 · ${formatDateTime(item.updatedAt)}`);
+}
+
+function getLibrary() {
+  try {
+    return JSON.parse(localStorage.getItem(LIBRARY_KEY) || "[]")
+      .filter((item) => item && item.id)
+      .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+  } catch {
+    return [];
+  }
+}
+
+function renderRecentMeetings() {
+  const list = $("recentMeetings");
+  const library = getLibrary();
+  if (!library.length) {
+    list.innerHTML = `<li class="px-2 py-3 text-sm leading-5 text-slate-500">저장된 미팅이 없습니다. 상단 저장 버튼을 누르면 최근 미팅에 추가됩니다.</li>`;
+    return;
+  }
+  list.innerHTML = library.map((item) => `
+    <li class="group flex items-stretch gap-1 rounded-md ${item.id === state.meetingId ? "bg-slate-800 ring-1 ring-slate-700" : "hover:bg-slate-800"}">
+      <button class="min-w-0 flex-1 rounded-md px-3 py-2 text-left transition hover:text-white" title="이 미팅 불러오기" data-load-meeting="${escapeAttribute(item.id)}">
+        <span class="block truncate text-sm font-semibold text-slate-200">${escapeHtml(item.fundName)}</span>
+        <span class="block truncate text-xs text-slate-500 group-hover:text-slate-400">${escapeHtml(item.managerName)} · ${escapeHtml(item.status)} · ${formatDateTime(item.updatedAt)}</span>
+        ${item.selectedFileName ? `<span class="mt-1 block truncate text-[11px] text-slate-600 group-hover:text-slate-500">원본 파일 재선택 필요: ${escapeHtml(item.selectedFileName)}</span>` : ""}
+      </button>
+      <button class="mr-1 flex w-8 shrink-0 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-700 hover:text-white" title="최근 미팅 삭제" data-delete-meeting="${escapeAttribute(item.id)}">
+        <i data-lucide="trash-2" class="h-4 w-4"></i>
+      </button>
+    </li>`).join("");
+  list.querySelectorAll("[data-load-meeting]").forEach((button) => {
+    button.addEventListener("click", () => loadMeetingFromLibrary(button.dataset.loadMeeting));
+  });
+  list.querySelectorAll("[data-delete-meeting]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteMeetingFromLibrary(button.dataset.deleteMeeting);
+    });
+  });
+  refreshIcons();
+}
+
+function scheduleExistingLibraryUpdate() {
+  if (!localMeetingStorageEnabled) return;
+  if (!state.meetingId || !isMeetingInLibrary(state.meetingId)) return;
+  clearTimeout(libraryUpdateTimer);
+  libraryUpdateTimer = setTimeout(() => {
+    saveMeetingToLibrary();
+  }, 800);
+}
+
+function isMeetingInLibrary(id) {
+  return getLibrary().some((entry) => entry.id === id);
+}
+
+function showRecentMeetingFeedback(message) {
+  const box = $("recentMeetingFeedback");
+  if (!box) return;
+  box.textContent = message;
+  box.classList.remove("hidden");
+  clearTimeout(showRecentMeetingFeedback.timer);
+  showRecentMeetingFeedback.timer = setTimeout(() => {
+    box.classList.add("hidden");
+  }, 4200);
+}
+
+function loadMeetingFromLibrary(id) {
+  const item = getLibrary().find((entry) => entry.id === id);
+  if (!item?.snapshot) {
+    toast("이전 저장 항목은 불러올 데이터가 없습니다. 다시 저장해주세요.");
+    return;
+  }
+  selectedFile = null;
+  state = mergeSavedState(item.snapshot);
+  state.meetingId = item.id;
+  applyStateToFields();
+  renderAll();
+  switchPhase(state.activePhase || "prep");
+  toast("최근 미팅을 불러왔습니다. 원본 파일은 다시 선택해야 합니다.");
+}
+
+function deleteMeetingFromLibrary(id) {
+  const item = getLibrary().find((entry) => entry.id === id);
+  const label = item ? `${item.managerName} / ${item.fundName}` : "선택한 미팅";
+  if (!confirm(`${label}을(를) 최근 미팅에서 삭제할까요? 현재 작성 중인 화면은 유지됩니다.`)) return;
+  const next = getLibrary().filter((entry) => entry.id !== id);
+  localStorage.setItem(LIBRARY_KEY, JSON.stringify(next));
+  if (state.meetingId === id) {
+    state.meetingId = null;
+    saveState();
+  }
+  renderRecentMeetings();
+  showRecentMeetingFeedback("최근 미팅에서 삭제했습니다. 현재 화면 내용은 유지됩니다.");
+  toast("최근 미팅에서 삭제했습니다.");
+}
+
+function getMeetingStorageBackup() {
+  return {
+    exportedAt: new Date().toISOString(),
+    app: "LP Meeting Copilot",
+    note: "Gemini API Key는 포함하지 않습니다. 이름/부서/모델 프로필은 별도 localStorage 키에 저장됩니다.",
+    currentMeeting: sanitizeStateForStorage(state),
+    recentMeetings: getLibrary()
+  };
+}
+
+function downloadJsonFile(data, fileName) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function resetCurrentMeetingAfterStorageClear() {
+  selectedFile = null;
+  state = emptyState();
+  applyStateToFields();
+  renderAll();
+  switchPhase("prep");
+}
+
+function removeMeetingStorageKeys() {
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(LIBRARY_KEY);
+}
+
+function clearLocalMeetingStorage() {
+  if (!confirm("브라우저에 저장된 현재 미팅과 최근 미팅 목록을 모두 삭제할까요? API Key는 원래 저장되어 있지 않고, 이름/부서/모델 설정은 유지됩니다.")) return;
+  removeMeetingStorageKeys();
+  resetCurrentMeetingAfterStorageClear();
+  renderStorageSettingsStatus();
+  showRecentMeetingFeedback("브라우저 저장소를 비웠습니다.");
+  toast("로컬 미팅 저장소를 모두 삭제했습니다.");
+}
+
+function exportMeetingStorageAndClear() {
+  const backup = getMeetingStorageBackup();
+  downloadJsonFile(backup, `meeting-copilot-backup-${new Date().toISOString().slice(0, 10)}.json`);
+  removeMeetingStorageKeys();
+  resetCurrentMeetingAfterStorageClear();
+  renderStorageSettingsStatus();
+  showRecentMeetingFeedback("백업 파일을 내려받고 브라우저 저장소를 비웠습니다.");
+  toast("백업 후 로컬 저장소를 삭제했습니다.");
+}
+
+function resetMeeting() {
+  if (!confirm("현재 미팅 내용을 새 미팅으로 초기화할까요? 저장된 최근 미팅 목록은 유지됩니다.")) return;
+  selectedFile = null;
+  state = emptyState();
+  applyStateToFields();
+  saveState();
+  renderAll();
+  toast("새 미팅을 시작합니다.");
+}
+
+function mergeSavedState(saved) {
+  const meeting = { ...emptyState().meeting, ...(saved.meeting || {}) };
+  if (!meeting.gpParticipants && meeting.contactName) meeting.gpParticipants = meeting.contactName;
+  return {
+    ...emptyState(),
+    ...saved,
+    meeting,
+    documentSettings: { ...emptyState().documentSettings, ...(saved.documentSettings || {}) },
+    questionRecords: Array.isArray(saved.questionRecords) ? saved.questionRecords : []
+  };
+}
+
+function sanitizeStateForStorage(sourceState) {
+  const safe = JSON.parse(JSON.stringify(sourceState || state));
+  delete safe.apiKey;
+  delete safe.geminiApiKey;
+  delete safe.selectedFile;
+  safe.selectedFileBlob = null;
+  return safe;
+}
+
+function createMeetingId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `meeting-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function showLoader(title, message) {
+  setBusy(true);
+  $("loaderTitle").textContent = title;
+  $("loaderMessage").textContent = message;
+  $("globalLoader").classList.remove("hidden");
+  $("globalLoader").classList.add("flex");
+  refreshIcons();
+}
+
+function updateLoader(title, message) {
+  $("loaderTitle").textContent = title;
+  $("loaderMessage").textContent = message;
+}
+
+function hideLoader() {
+  $("globalLoader").classList.add("hidden");
+  $("globalLoader").classList.remove("flex");
+  setBusy(false);
+}
+
+function setBusy(nextBusy) {
+  isBusy = nextBusy;
+  [
+    "generateBriefButton",
+    "generateReportButton",
+    "regenerateReportButton",
+    "saveButton",
+    "savePrepButton",
+    "exportButton",
+    "exportDocxButton",
+    "copyAllButton"
+  ].forEach((id) => {
+    const element = $(id);
+    if (element) element.disabled = nextBusy;
+  });
+}
+
+function showError(error) {
+  const message = normalizeGeminiError(error);
+  toast(message);
+}
+
+function normalizeGeminiError(error) {
+  const message = error?.message || "";
+  const info = error?.gemini;
+  if (info?.message) return info.message;
+  if (/API Key가 아직 적용되지 않았습니다/i.test(message)) return message;
+  if (/기본 모델과 Flash Lite 재시도 모두 실패했습니다/i.test(message)) {
+    return message;
+  }
+  if (/무료 한도|분당 한도|유효하지 않거나|권한|모델을 사용할 수 없습니다/i.test(message)) {
+    return message;
+  }
+  if (/503|UNAVAILABLE|high demand|사용량이 많습니다/i.test(message)) {
+    return `${lastGeminiModelUsed} 모델이 일시적으로 혼잡합니다. 잠시 후 다시 시도하거나 Flash Lite 모델을 선택하세요.`;
+  }
+  if (
+    message === LIMIT_MESSAGE ||
+    /quota|429|api key|permission|unauth|model|billing|resource_exhausted/i.test(message)
+  ) {
+    return LIMIT_MESSAGE;
+  }
+  return message || LIMIT_MESSAGE;
+}
+
+function toast(message) {
+  const box = $("toast");
+  box.textContent = message;
+  box.classList.remove("hidden");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => box.classList.add("hidden"), 3200);
+}
+
+function refreshIcons() {
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function asArray(value) {
+  if (Array.isArray(value)) return value;
+  if (!value) return [];
+  return [value];
+}
+
+function renderList(items) {
+  const array = asArray(items).filter(Boolean);
+  if (!array.length) return emptyText();
+  return `<ul>${array.map((item) => `<li>${formatListItemHtml(item)}</li>`).join("")}</ul>`;
+}
+
+function renderInlineList(items) {
+  return asArray(items).map((item) => escapeHtml(String(item))).join(", ");
+}
+
+function listMarkdown(items) {
+  const array = asArray(items).filter(Boolean);
+  return array.length ? array.map((item) => `- ${formatListItemText(item)}`).join("\n") : "- 확인 필요";
+}
+
+function formatListItemHtml(item) {
+  return escapeHtml(formatListItemText(item));
+}
+
+function formatNestedListValue(value) {
+  if (Array.isArray(value)) return value.map(formatListItemText).filter(Boolean).join(", ");
+  if (value && typeof value === "object") return formatListItemText(value);
+  return String(value ?? "");
+}
+
+function formatListItemText(item) {
+  if (Array.isArray(item)) return item.map(formatListItemText).filter(Boolean).join(", ");
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return String(item ?? "");
+  if (item.riskType || item.assessment || item.details) {
+    return [
+      formatNestedListValue(item.riskType),
+      item.assessment ? `(${formatNestedListValue(item.assessment)})` : "",
+      item.details ? `- ${formatNestedListValue(item.details)}` : ""
+    ].filter(Boolean).join(" ");
+  }
+  if (item.request || item.rationale || item.category) {
+    return [
+      item.category ? `[${formatNestedListValue(item.category)}]` : "",
+      formatNestedListValue(item.request || item.title || item.question || ""),
+      item.importance ? `(${formatNestedListValue(item.importance)})` : "",
+      item.rationale ? `- ${formatNestedListValue(item.rationale)}` : ""
+    ].filter(Boolean).join(" ");
+  }
+  if (item.title || item.note) {
+    return [formatNestedListValue(item.title), item.note ? `- ${formatNestedListValue(item.note)}` : ""].filter(Boolean).join(" ");
+  }
+  return Object.entries(item)
+    .filter(([, value]) => value !== undefined && value !== null && String(formatNestedListValue(value)).trim())
+    .map(([key, value]) => `${labelize(key)}: ${formatNestedListValue(value)}`)
+    .join(" / ");
+}
+
+function emptyText() {
+  return `<p class="text-sm text-slate-400">확인 필요</p>`;
+}
+
+function hasAnswer(record) {
+  return record.answer?.trim() || record.internalMemo?.trim() || record.importantQuote?.trim() || record.followUpNeeded;
+}
+
+function deriveAnswerRecordStatus(record = {}) {
+  if (record.followUpNeeded) return "추가 검토 필요";
+  if (record.answer?.trim()) return "답변됨";
+  return "미확인";
+}
+
+function capitalize(value) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function labelize(key) {
+  const labels = {
+    managerName: "운용사명",
+    fundName: "펀드명 / 대출명",
+    gpParticipants: "GP측 참가자",
+    lpParticipants: "당사 참가자",
+    contactName: "GP측 참가자",
+    meetingDate: "미팅일",
+    locationType: "투자지역",
+    assetClass: "자산군",
+    strategy: "전략",
+    sector: "섹터",
+    capitalType: "Equity / Debt",
+    investmentStructure: "투자구조",
+    keyConcerns: "딜 / 자산 메모",
+    capitalStructure: "투자구조",
+    keyNumbers: "핵심 숫자"
+  };
+  return labels[key] || key;
+}
+
+function markdownToHtml(markdown) {
+  const lines = markdown.split("\n");
+  let html = "";
+  let inList = false;
+  lines.forEach((line) => {
+    if (line.startsWith("# ")) {
+      if (inList) { html += "</ul>"; inList = false; }
+      html += `<h2>${escapeHtml(line.slice(2))}</h2>`;
+    } else if (line.startsWith("## ")) {
+      if (inList) { html += "</ul>"; inList = false; }
+      html += `<h3>${escapeHtml(line.slice(3))}</h3>`;
+    } else if (line.startsWith("- ")) {
+      if (!inList) { html += "<ul>"; inList = true; }
+      html += `<li>${formatBold(escapeHtml(line.slice(2)))}</li>`;
+    } else if (line.trim()) {
+      if (inList) { html += "</ul>"; inList = false; }
+      html += `<p>${formatBold(escapeHtml(line))}</p>`;
+    }
+  });
+  if (inList) html += "</ul>";
+  return html;
+}
+
+function formatBold(text) {
+  return text.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function escapeAttribute(value) {
+  return escapeHtml(value).replace(/`/g, "&#096;");
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / Math.pow(1024, index)).toFixed(index ? 1 : 0)} ${units[index]}`;
+}
+
+function formatNumber(value) {
+  return new Intl.NumberFormat("ko-KR").format(value || 0);
+}
+
+function formatDateTime(value) {
+  if (!value) return "시간 미상";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "시간 미상";
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function safeFileName(value) {
+  return String(value).replace(/[\\/:*?"<>|]/g, "_").trim() || "meeting";
+}
+
+function makeFileMeta(file) {
+  return {
+    fileName: file.name,
+    size: file.size,
+    sizeLabel: formatBytes(file.size),
+    mimeType: file.type || guessMimeType(file.name)
+  };
+}
+
+function guessMimeType(fileName) {
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith(".pdf")) return "application/pdf";
+  if (lower.endsWith(".txt")) return "text/plain";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  return "application/octet-stream";
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function parsePageRanges(input, maxPage) {
+  const pages = new Set();
+  String(input || "").split(",").forEach((part) => {
+    const trimmed = part.trim();
+    if (!trimmed) return;
+    if (trimmed.includes("-")) {
+      const [start, end] = trimmed.split("-").map((value) => Number(value.trim()));
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+      for (let page = Math.max(1, start); page <= Math.min(maxPage, end); page += 1) pages.add(page);
+    } else {
+      const page = Number(trimmed);
+      if (Number.isFinite(page) && page >= 1 && page <= maxPage) pages.add(page);
+    }
+  });
+  return [...pages].sort((a, b) => a - b);
+}

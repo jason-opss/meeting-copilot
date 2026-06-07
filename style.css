@@ -1,0 +1,284 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Inter", "Noto Sans KR", sans-serif;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.icon-button {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: #64748b;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.icon-button:hover {
+  background: #f1f5f9;
+  color: #334155;
+}
+
+.phase-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 2px solid transparent;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 600;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.phase-tab span {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.phase-tab.active {
+  border-color: #2563eb;
+  color: #2563eb;
+}
+
+.phase-tab.active span {
+  background: #dbeafe;
+  color: #2563eb;
+}
+
+.drop-zone {
+  border: 2px dashed #cbd5e1;
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.drop-zone.dragover {
+  background: #eff6ff;
+  border-color: #3b82f6;
+  transform: translateY(-1px);
+}
+
+.field-label {
+  display: block;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.field-control {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  margin-top: 6px;
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0f172a;
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.field-control:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.16);
+}
+
+textarea.field-control {
+  resize: vertical;
+}
+
+.small-action {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 8px;
+  background: #f1f5f9;
+  padding: 7px 12px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.small-action:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.primary-soft {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.primary-soft:hover {
+  background: #bfdbfe;
+  color: #1e40af;
+}
+
+.brief-card,
+.question-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+}
+
+.brief-card {
+  padding: 18px;
+}
+
+.brief-card h3,
+.question-card h3 {
+  margin: 0 0 10px;
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.brief-card ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #475569;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.brief-card li + li {
+  margin-top: 6px;
+}
+
+.question-card {
+  cursor: pointer;
+  padding: 14px;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.question-card:hover {
+  border-color: #bfdbfe;
+  transform: translateY(-1px);
+}
+
+.question-card.selected {
+  border-color: #93c5fd;
+  border-left: 4px solid #2563eb;
+}
+
+.question-card .meta {
+  margin-bottom: 6px;
+  color: #2563eb;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.question-card p {
+  margin: 0;
+  color: #1e293b;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.55;
+}
+
+.prose-shell {
+  color: #334155;
+  line-height: 1.7;
+}
+
+.prose-shell h2 {
+  margin: 0 0 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e2e8f0;
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.prose-shell h3 {
+  margin: 24px 0 10px;
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.prose-shell p {
+  margin: 0 0 12px;
+}
+
+.prose-shell ul,
+.prose-shell ol {
+  margin: 0 0 14px;
+  padding-left: 22px;
+}
+
+.prose-shell li + li {
+  margin-top: 6px;
+}
+
+.prose-shell table {
+  width: 100%;
+  margin: 14px 0;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.prose-shell th,
+.prose-shell td {
+  border: 1px solid #e2e8f0;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose-shell th {
+  background: #f8fafc;
+  color: #0f172a;
+  font-weight: 800;
+}
+
+@media (max-width: 640px) {
+  .phase-tab {
+    gap: 6px;
+    font-size: 12px;
+  }
+
+  .phase-tab strong {
+    max-width: 70px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
