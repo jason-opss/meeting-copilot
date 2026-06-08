@@ -753,6 +753,8 @@ async function generateBrief() {
     const prompt = buildBriefPrompt();
     const brief = await callGeminiText(prompt, { json: true, temperature: 0.25 });
     state.preMeetingBrief = normalizeBrief(parseGeminiJson(brief));
+    updateLoader("Q&A 적합성을 검토하는 중입니다.", "GP에게 실제로 물을 수 있는 질문인지 다시 점검하고, LP 내부 입력 출처 표현은 딜 사실관계 질문으로 바꿉니다.");
+    state.preMeetingBrief = await refineBriefQuestionsForGp(state.preMeetingBrief);
     hydrateMeetingFieldsFromAnalysis();
     state.questionRecords = makeQuestionRecords(state.preMeetingBrief);
     state.selectedQuestionIndex = 0;
@@ -1467,7 +1469,7 @@ function buildBriefPrompt() {
 - Q&A는 최소 5개, 최대 10개로 작성합니다.
 - Q&A의 중심은 딜 판단입니다. 투자 thesis, 구조, 상환/Exit, 담보/보증, 현금흐름, track record, alignment, 주요 리스크와 mitigation을 우선 질문하세요.
 - IM 내부 숫자/문구 오류 확인 질문은 보조 질문입니다. 같은 항목의 숫자, 금리, 수익률, LTV, DSCR, 기간, 금액, 약정 조건이 서로 다르게 적혀 있는 경우에만 expectedQaList에 포함하고, 전체 Q&A 중 최대 2개까지만 포함하세요.
-- 운용사명, 사업주체, 주주, 신탁사, 시공사처럼 역할이 여러 개인 당사자가 섞여 있을 때는 "확인됩니다", "불일치합니다"처럼 단정하지 말고 "역할 및 법적 지위 확인 필요", "사용자 입력 운용사와 IM상 주요 관계자의 역할 구분 필요"처럼 질문형으로 낮춰 쓰세요.
+- 운용사명, 사업주체, 주주, 신탁사, 시공사처럼 역할이 여러 개인 당사자가 섞여 있을 때는 "확인됩니다", "불일치합니다"처럼 단정하지 말고 "본 건 관계자의 역할, 법적 지위, 책임 범위 및 계약상 관계 확인 필요"처럼 GP가 답할 수 있는 질문형으로 낮춰 쓰세요. "사용자 입력", "세팅값", "내부 메모" 같은 LP 내부 출처 표현은 Q&A 질문에 쓰지 마세요.
 - 시장검색 또는 IM에서 직접 확인되지 않은 운용사/주관사/거래당사자 관계를 새로 만들어 단정하지 마세요.
 - Alignment/IM 정합성 질문은 딜 판단에 중요한 경우에만 넣고, 전체 Q&A 중 1개를 넘기지 마세요.
 - 예: 주택도시기금 금리가 한 곳에는 2.8%, 다른 곳에는 2.6%로 보이면 "적용 기준일, 적용 구간, 산식 또는 오기 여부"를 묻는 Q&A를 만드세요.
@@ -1873,31 +1875,6 @@ function buildSearchGroundingFailureInfo(failures = []) {
 
 async function callGeminiGenerate(body, options = {}) {
   requireApiKey();
-  const model = options.model || runtimeConfig.model || DEFAULT_MODEL;
-  try {
-    return await callGeminiModel(model, body, options);
-  } catch (error) {
-    if (!options.noFallback && shouldFallbackToFlashLite(model, error)) {
-      toast(`${model} 호출이 ${describeGeminiFallbackReason(error)}로 실패해 이번 요청만 ${FALLBACK_MODEL}로 다시 시도합니다. 설정 모델은 유지됩니다.`);
-      logGeminiDiagnostic({
-        model,
-        status: error?.gemini?.status || null,
-        statusText: error?.gemini?.statusText || "",
-        reason: "fallback_for_this_request",
-        rawMessage: error?.gemini?.rawMessage || error?.message || ""
-      });
-      try {
-        return await callGeminiModel(FALLBACK_MODEL, body, options);
-      } catch (fallbackError) {
-        throw new Error(`기본 모델과 ${FALLBACK_MODEL} 재시도 모두 실패했습니다. ${fallbackError.message}`);
-      }
-    }
-    throw error;
-  }
-}
-
-async function callGeminiGenerate(body, options = {}) {
-  requireApiKey();
   const models = options.noFallback
     ? [options.model || runtimeConfig.model || DEFAULT_MODEL]
     : buildGenerationModelCandidates(options.model || runtimeConfig.model || DEFAULT_MODEL);
@@ -2011,21 +1988,6 @@ function shouldFallbackToFlashLite(model, error = "") {
   if (info?.status === 429 || info?.status === 503) return true;
   if (["rate_limit", "unavailable"].includes(info?.reason)) return true;
   return /503|UNAVAILABLE|high demand|quota|429|RESOURCE_EXHAUSTED|GenerateContentRequestsPerDay|사용량이 많습니다/i.test(message);
-}
-
-function describeGeminiFallbackReason(error = {}) {
-  const info = error?.gemini || {};
-  const raw = `${info.status || ""} ${info.statusText || ""} ${info.rawMessage || ""} ${error?.message || ""}`;
-  if (info.reason === "unavailable" || /503|UNAVAILABLE|high demand/i.test(raw)) return "모델 혼잡 또는 일시 장애";
-  if (/TPM|input_token|output_token|token/i.test(raw)) return "토큰 처리량 한도";
-  if (/RPM|RequestsPerMinute|GenerateContentRequestsPerMinute/i.test(raw)) return "분당 요청 수 한도";
-  if (/RPD|RequestsPerDay|GenerateContentRequestsPerDay/i.test(raw)) return "일일 요청 수 한도";
-  if (info.status === 429 || /429|RESOURCE_EXHAUSTED|quota|rate limit/i.test(raw)) return "프로젝트/API 한도";
-  return "한도 또는 일시 혼잡";
-}
-
-function normalizeGeminiApiError(errorText, status, model) {
-  return getGeminiErrorInfo(errorText, status, model).message;
 }
 
 function getGeminiErrorInfo(errorText, status, model) {
@@ -2167,6 +2129,118 @@ function normalizeBrief(brief) {
     expectedFollowUpRequests: asArray(brief.expectedFollowUpRequests),
     verificationItems: mergeTextLists([...asArray(brief.verificationItems), ...imIssueQuestions.map((item) => item.rationale)])
   };
+}
+
+async function refineBriefQuestionsForGp(brief) {
+  const originalQuestions = asArray(brief?.expectedQaList);
+  if (!originalQuestions.length) return brief;
+  try {
+    const text = await callGeminiText(buildQuestionSuitabilityPrompt(brief), { json: true, temperature: 0.1 });
+    const parsed = parseGeminiJson(text);
+    const refinedQuestions = normalizeGpQuestionReviewList(parsed.expectedQaList || parsed.questions || [], originalQuestions);
+    if (refinedQuestions.length >= 5) {
+      return {
+        ...brief,
+        expectedQaList: refinedQuestions,
+        verificationItems: mergeTextLists([
+          ...asArray(brief.verificationItems),
+          ...asArray(parsed.removedOrMovedItems).map(formatListItemText)
+        ])
+      };
+    }
+  } catch (error) {
+    console.warn("Q&A suitability review failed; applying local question cleanup.", error);
+  }
+  return {
+    ...brief,
+    expectedQaList: normalizeGpQuestionReviewList(originalQuestions, originalQuestions)
+  };
+}
+
+function buildQuestionSuitabilityPrompt(brief) {
+  return `
+당신은 기관 LP가 GP 미팅에서 읽을 Q&A 리스트를 최종 편집하는 검토자입니다.
+아래 Q&A가 "GP에게 직접 물어볼 수 있는 질문"인지 다시 판단하고, 부적절한 표현은 질문을 버리지 말고 GP가 답할 수 있는 딜 사실관계 질문으로 고쳐 JSON으로만 답하세요.
+
+핵심 원칙:
+- 검색/시장동향 생성은 이미 별도 단계에서 끝났습니다. 여기서는 Q&A 문장만 검토합니다.
+- "사용자 입력", "LP 내부 입력", "세팅값", "앱 입력값", "내부 메모"처럼 GP가 알 수 없는 출처 표현은 question에 절대 쓰지 마세요.
+- 단, 사용자가 입력한 메모나 우려사항에 담긴 주요 리스크는 버리지 마세요. GP가 답할 수 있는 사실관계, 계약 조건, 증빙자료, 리스크 완화 질문으로 재작성하세요.
+- IM과 입력값이 충돌해 보일 때도 "사용자 입력과 IM이 불일치"라고 묻지 말고, "제공 자료 기준으로 각 당사자의 역할, 법적 지위, 책임 범위, 계약상 관계를 확인해 달라"처럼 물으세요.
+- GP가 모를 LP 내부 판단 과정, UI 입력 출처, 모델 판단 근거를 묻는 질문은 금지입니다.
+- GP가 알 수 있는 항목은 사업주체/차주/주주/운용사/시공사/신탁사/대주단 관계, 계약 책임, 전력/인허가, 임대/테넌트, EPC, 담보/보증, DSCR/LTV, 상환/리파이낸싱, 트랙레코드, alignment입니다.
+- 질문은 최소 5개, 최대 10개를 유지하세요. 중요 리스크가 있으면 삭제보다 재작성하세요.
+- 내부 사고 과정은 출력하지 마세요.
+
+세팅값:
+${JSON.stringify(state.meeting, null, 2)}
+
+시장 맥락:
+${JSON.stringify(state.marketContext || null, null, 2)}
+
+브리프:
+${JSON.stringify(brief, null, 2)}
+
+응답 JSON 스키마:
+{
+  "expectedQaList": [
+    {
+      "category": "투자 thesis/구조/상환·Exit/담보·보증/현금흐름/트랙레코드/Alignment/리스크/IM 정합성 중 하나",
+      "importance": "High/Medium/Low",
+      "question": "GP에게 그대로 물을 수 있는 질문",
+      "rationale": "LP 관점에서 확인해야 하는 이유",
+      "source": "Q&A 적합성 검토"
+    }
+  ],
+  "removedOrMovedItems": ["질문에서 제외하거나 확인 필요 항목으로 이동한 내부 출처/표현"]
+}`;
+}
+
+function normalizeGpQuestionReviewList(reviewedQuestions, originalQuestions = []) {
+  const cleaned = mergeQuestionLists(asArray(reviewedQuestions)
+    .map(normalizeQuestionForDealType)
+    .map(rewriteQuestionForGpAudience)
+    .filter(isQuestionSuitableForGp));
+  const withFallback = cleaned.length >= 5
+    ? cleaned
+    : mergeQuestionLists([...cleaned, ...asArray(originalQuestions).map(rewriteQuestionForGpAudience), ...buildFallbackDealQuestions()])
+      .filter(isQuestionSuitableForGp);
+  return withFallback.slice(0, 10);
+}
+
+function rewriteQuestionForGpAudience(item) {
+  if (!item || typeof item !== "object") return item;
+  let question = String(item.question || "").trim();
+  let rationale = String(item.rationale || "").trim();
+  const internalSourcePattern = /사용자\s*입력|LP\s*내부\s*입력|내부\s*메모|세팅값|앱\s*입력값|화면\s*입력값/gi;
+  if (internalSourcePattern.test(question)) {
+    question = question
+      .replace(/사용자\s*입력\s*운용사와\s*IM상\s*사업주체·주주·운용\s*관련\s*당사자의\s*역할이\s*혼재되어\s*보입니다\.?/gi, "제공 자료 기준으로 본 건의 운용사, 사업주체, 주주 및 운용 관련 당사자의 역할 구분이 필요합니다.")
+      .replace(/사용자\s*입력\s*내용과\s*IM상\s*주요\s*관계자의\s*역할\s*구분/gi, "제공 자료상 주요 관계자의 역할 구분")
+      .replace(internalSourcePattern, "제공 자료");
+  }
+  if (internalSourcePattern.test(rationale)) {
+    rationale = rationale.replace(internalSourcePattern, "제공 자료");
+  }
+  question = question
+    .replace(/GP가\s*알\s*수\s*없는\s*/gi, "")
+    .replace(/입력\s*출처/gi, "자료 출처")
+    .replace(/\s+/g, " ")
+    .trim();
+  return {
+    ...item,
+    question,
+    rationale,
+    source: item.source === "사용자 입력" ? "Q&A 적합성 검토" : item.source || "Q&A 적합성 검토"
+  };
+}
+
+function isQuestionSuitableForGp(item) {
+  if (!item?.question) return false;
+  const question = String(item.question);
+  if (/사용자\s*입력|LP\s*내부\s*입력|내부\s*메모|세팅값|앱\s*입력값|화면\s*입력값/i.test(question)) return false;
+  if (/왜\s*사용자가|어떤\s*필드|모델이\s*판단|LLM|프롬프트/i.test(question)) return false;
+  return question.length >= 12;
 }
 
 function normalizeBriefSnapshot(snapshot = {}) {
@@ -2427,9 +2501,9 @@ function softenUnsupportedRoleAssertion(item) {
     ...item,
     category: "Alignment",
     importance: item.importance === "Low" ? "Medium" : item.importance || "Medium",
-    question: "사용자 입력 운용사와 IM상 사업주체·주주·운용 관련 당사자의 역할이 혼재되어 보입니다. 본 건에서 각 당사자의 역할, 법적 지위, 책임 범위 및 대주단과의 계약상 관계는 어떻게 정리됩니까?",
+    question: "본 건의 운용사, 사업주체, 주주 및 운용 관련 당사자의 역할 구분이 필요합니다. 각 당사자의 역할, 법적 지위, 책임 범위 및 대주단과의 계약상 관계는 어떻게 정리됩니까?",
     rationale: "관계자 역할을 단정하지 않고 계약상 책임 주체와 이해관계 정렬 여부를 확인할 필요가 있음",
-    source: item.source || "IM/사용자 입력 역할 확인"
+    source: item.source || "Q&A 적합성 검토"
   };
 }
 
