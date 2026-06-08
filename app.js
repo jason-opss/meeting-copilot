@@ -14,10 +14,26 @@ const TEXT_GENERATION_ALLOWED_MODELS = [
 ];
 const SEARCH_GROUNDING_MODEL = "gemini-2.5-flash-lite";
 const SEARCH_GROUNDING_MODEL_CANDIDATES = [
-  "gemini-2.5-flash-lite",
+  "gemini-3.5-flash",
+  "gemini-3.1-flash-lite",
   "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
   "gemini-2.0-flash"
 ];
+const IM_TEXT_LIMITS = {
+  focused: 160000,
+  standard: 220000
+};
+const IM_TEXT_FILE_LIMITS = {
+  focused: 140000,
+  standard: 220000
+};
+const IM_STANDARD_MAX_PAGES = 80;
+const IM_FOCUSED_MAX_PAGES = 28;
+const IM_SPARSE_PDF_MAX_PAGES = 24;
+const IM_VISION_MAX_PAGES = 16;
+const IM_SPARSE_PAGE_TEXT_LENGTH = 120;
+const IM_SPARSE_TOTAL_TEXT_LENGTH = 1500;
 const LIMIT_MESSAGE = "API Key가 없거나 한도가 제한되었습니다.";
 const PDFJS_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs";
 const PDFJS_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs";
@@ -611,7 +627,7 @@ function makeInitial(name) {
 function renderProviderStatus() {
   if (!$("providerStatus")) return;
   const base = runtimeConfig.apiKey
-    ? `Gemini API Key가 현재 탭 메모리에만 적용되어 있습니다. 현재 모델: ${runtimeConfig.model || DEFAULT_MODEL} / 검색 그라운딩: ${lastSearchGroundingModelUsed || SEARCH_GROUNDING_MODEL} (2.5 flash-lite → 2.5 flash → 2.0 flash) / 적용 키: ${keyFingerprint(runtimeConfig.apiKey)}`
+    ? `Gemini API Key가 현재 탭 메모리에만 적용되어 있습니다. 현재 모델: ${runtimeConfig.model || DEFAULT_MODEL} / 검색 그라운딩: ${lastSearchGroundingModelUsed || SEARCH_GROUNDING_MODEL} (설정 모델 → 3.5/3.1 → 2.5 → 2.0 순 fallback) / 적용 키: ${keyFingerprint(runtimeConfig.apiKey)}`
     : `Gemini API Key가 없습니다. AI 버튼을 실행하면 "${LIMIT_MESSAGE}" 메시지가 표시됩니다.`;
   const diagnostic = formatGeminiDiagnostic(lastGeminiDiagnostic);
   $("providerStatus").textContent = diagnostic ? `${base}\n${diagnostic}` : base;
@@ -683,7 +699,7 @@ function renderFileState() {
     removeButton?.classList.remove("hidden");
   } else {
     $("dropZoneTitle").textContent = "IM, Teaser, 이미지 PDF를 업로드하세요";
-    $("dropZoneDescription").textContent = "PDF, TXT, PNG, JPG 지원. 큰 문서는 핵심 페이지 중심으로 읽습니다.";
+    $("dropZoneDescription").textContent = "PDF, TXT, PNG, JPG 지원. 큰 문서는 핵심·중간·후반 페이지를 균형 있게 읽습니다.";
     $("fileModeBadge").textContent = "선택 사항";
     $("fileModeBadge").className = "rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-500";
     removeButton?.classList.add("hidden");
@@ -699,17 +715,43 @@ function renderProcessingLog() {
     return;
   }
   const result = state.imProcessingResult;
+  const diagnostics = result.processingDiagnostics || {};
   const pages = result.selectedPageNumbers?.length ? `선택 페이지: ${result.selectedPageNumbers.join(", ")}` : "선택 페이지 없음";
+  const flowLabel = getImAnalysisFlowLabel(diagnostics.analysisFlow || result.analysisMode);
+  const extractionLabel = getImExtractionLabel(diagnostics.extractionType || result.analysisMode);
+  const detailRows = [
+    diagnostics.fileType ? `파일 유형: ${diagnostics.fileType}` : "",
+    diagnostics.pageCount ? `전체 페이지: ${formatNumber(diagnostics.pageCount)}쪽` : "",
+    diagnostics.selectedPageCount ? `읽은 페이지 수: ${formatNumber(diagnostics.selectedPageCount)}쪽` : "",
+    diagnostics.textPageCount !== undefined ? `텍스트 추출 페이지: ${formatNumber(diagnostics.textPageCount)}쪽` : "",
+    diagnostics.sparseText ? "판독 방식: 텍스트가 적어 이미지 판독 사용" : "",
+    diagnostics.visionPageNumbers?.length ? `이미지 판독 페이지: ${diagnostics.visionPageNumbers.join(", ")}` : "",
+    diagnostics.chunkCount > 1 ? `2단계 요약: ${formatNumber(diagnostics.chunkCount)}개 묶음 → 통합 요약` : "",
+    diagnostics.chunkLabels?.length && diagnostics.chunkCount > 1 ? `요약 묶음: ${diagnostics.chunkLabels.join(", ")}` : ""
+  ].filter(Boolean);
   box.classList.remove("hidden");
   box.innerHTML = `
     <div class="font-extrabold text-slate-900">문서 처리 결과</div>
     <div class="mt-2 space-y-1 text-sm">
-      <div>처리 방식: ${escapeHtml(result.analysisMode || "standard")}</div>
+      <div>처리 방식: ${escapeHtml(result.analysisMode || "standard")} · ${escapeHtml(extractionLabel)} · ${escapeHtml(flowLabel)}</div>
       <div>${escapeHtml(pages)}</div>
       <div>읽은 텍스트: ${formatNumber(result.textCharCount || 0)}자</div>
+      ${detailRows.length ? `<div class="mt-2 rounded-md bg-slate-50 p-3 text-xs leading-5 text-slate-600">${detailRows.map((row) => `<div>${escapeHtml(row)}</div>`).join("")}</div>` : ""}
       ${result.warning ? `<div class="text-amber-700">${escapeHtml(result.warning)}</div>` : ""}
     </div>
   `;
+}
+
+function getImAnalysisFlowLabel(value = "") {
+  if (/two_stage/i.test(value)) return "2단계 요약";
+  if (/vision/i.test(value)) return "단일 이미지 요약";
+  return "단일 요약";
+}
+
+function getImExtractionLabel(value = "") {
+  if (/vision|image/i.test(value)) return "이미지 판독";
+  if (/text/i.test(value)) return "텍스트 추출";
+  return "자동 판독";
 }
 
 function renderStatus() {
@@ -757,7 +799,7 @@ async function generateBrief() {
     showLoader("사전 브리프를 생성하고 있습니다.", "IM과 세팅값을 통합하고 시장, 뉴스, 정책, 리스크 맥락을 보강합니다.");
 
     if (selectedFile) {
-      updateLoader("IM을 읽는 중입니다.", "큰 문서는 핵심 페이지 중심으로 읽습니다.");
+      updateLoader("IM을 읽는 중입니다.", "큰 문서는 핵심·중간·후반 페이지를 균형 있게 읽습니다.");
       state.imProcessingResult = await processSelectedIm();
       hydrateMeetingFieldsFromAnalysis();
       renderProcessingLog();
@@ -859,8 +901,12 @@ async function processSelectedIm() {
 async function processTextFile(file) {
   const text = await file.text();
   const policy = chooseFocusedPolicy({ file, text, pageCount: 1 });
-  const excerpt = policy.mode === "focused" ? text.slice(0, 70000) : text.slice(0, 120000);
-  const analysis = await analyzeImText(excerpt, policy, { fileName: file.name, mimeType: file.type || "text/plain" });
+  const excerpt = text.slice(0, getImTextLimit(policy, "text"));
+  const analysisResult = await analyzeImTextWithStaging(
+    buildTextAnalysisChunks(excerpt),
+    policy,
+    { fileName: file.name, mimeType: file.type || "text/plain" }
+  );
   return {
     uploadedFileMetadata: makeFileMeta(file),
     analysisMode: policy.mode,
@@ -868,17 +914,29 @@ async function processTextFile(file) {
     selectedPageNumbers: [1],
     textExcerpt: excerpt,
     textCharCount: excerpt.length,
-    imAnalysis: analysis,
-    warning: policy.warning
+    imAnalysis: analysisResult.analysis,
+    warning: policy.warning,
+    processingDiagnostics: {
+      fileType: "TXT",
+      extractionType: "text",
+      pageCount: 1,
+      selectedPageCount: 1,
+      analysisFlow: analysisResult.diagnostics.analysisFlow,
+      chunkCount: analysisResult.diagnostics.chunkCount,
+      chunkLabels: analysisResult.diagnostics.chunkLabels,
+      textLimit: getImTextLimit(policy, "text")
+    }
   };
 }
 
 async function processImageFile(file, mimeType) {
   const policy = chooseFocusedPolicy({ file, text: "", pageCount: 1 });
   const base64 = await fileToBase64(file);
-  const prompt = buildImVisionPrompt(policy, makeFileMeta(file));
-  const text = await callGeminiVision([{ mimeType, data: base64 }], prompt);
-  const analysis = parseGeminiJson(text);
+  const visionResult = await analyzeImVisionWithStaging(
+    [{ mimeType, data: base64, label: `[Image: ${file.name}]` }],
+    policy,
+    makeFileMeta(file)
+  );
   return {
     uploadedFileMetadata: makeFileMeta(file),
     analysisMode: "vision",
@@ -886,8 +944,18 @@ async function processImageFile(file, mimeType) {
     selectedPageNumbers: [1],
     textExcerpt: "",
     textCharCount: 0,
-    imAnalysis: analysis,
-    warning: policy.warning
+    imAnalysis: visionResult.analysis,
+    warning: policy.warning,
+    processingDiagnostics: {
+      fileType: "이미지",
+      extractionType: "vision",
+      pageCount: 1,
+      selectedPageCount: 1,
+      analysisFlow: visionResult.diagnostics.analysisFlow,
+      chunkCount: visionResult.diagnostics.chunkCount,
+      chunkLabels: visionResult.diagnostics.chunkLabels,
+      visionPageNumbers: [1]
+    }
   };
 }
 
@@ -895,30 +963,57 @@ async function processPdfFile(file) {
   const pdf = await extractPdfText(file);
   const policy = chooseFocusedPolicy({ file, text: pdf.fullText, pageCount: pdf.pageCount });
   const selectedPages = selectPages(pdf.pages, policy);
-  const selectedText = selectedPages.map((page) => `\n\n[Page ${page.pageNumber}]\n${page.text}`).join("").slice(0, policy.mode === "focused" ? 80000 : 140000);
+  const selectedText = selectedPages
+    .map((page) => `\n\n[Page ${page.pageNumber}]\n${page.text}`)
+    .join("")
+    .slice(0, getImTextLimit(policy, "pdf"));
 
   let analysis;
   let warning = policy.warning;
-  if (selectedText.trim().length > 1000) {
-    analysis = await analyzeImText(selectedText, policy, makeFileMeta(file));
+  let readPageNumbers = selectedPages.map((page) => page.pageNumber);
+  const sparsePdfText = isSparsePdfText(pdf.pages);
+  if (selectedText.trim().length > 1000 && !sparsePdfText) {
+    const analysisResult = await analyzeImTextWithStaging(
+      buildPageAnalysisChunks(selectedPages),
+      policy,
+      makeFileMeta(file)
+    );
+    analysis = analysisResult.analysis;
+    pdf.analysisDiagnostics = analysisResult.diagnostics;
   } else {
-    const images = await renderPdfPages(file, selectedPages.slice(0, 6).map((page) => page.pageNumber));
+    const visionPageNumbers = selectVisionPageNumbers(selectedPages, pdf.pageCount);
+    const images = await renderPdfPages(file, visionPageNumbers);
     if (!images.length) throw new Error("PDF를 브라우저에서 읽지 못했습니다. 페이지 범위를 줄여 다시 시도해주세요.");
-    const prompt = buildImVisionPrompt(policy, makeFileMeta(file));
-    const text = await callGeminiVision(images, prompt);
-    analysis = parseGeminiJson(text);
-    warning = warning || "텍스트가 적어 이미지 페이지를 Vision으로 읽었습니다.";
+    const visionResult = await analyzeImVisionWithStaging(images, policy, makeFileMeta(file));
+    analysis = visionResult.analysis;
+    pdf.analysisDiagnostics = visionResult.diagnostics;
+    readPageNumbers = visionPageNumbers;
+    warning = [warning, `텍스트 추출이 제한적이어서 ${visionPageNumbers.length}개 페이지를 이미지로 읽었습니다.`].filter(Boolean).join(" ");
   }
 
   return {
     uploadedFileMetadata: makeFileMeta(file),
     analysisMode: policy.mode,
     analysisReasons: policy.reasons,
-    selectedPageNumbers: selectedPages.map((page) => page.pageNumber),
+    selectedPageNumbers: readPageNumbers,
     textExcerpt: selectedText,
     textCharCount: selectedText.length,
     imAnalysis: analysis,
-    warning
+    warning,
+    processingDiagnostics: {
+      fileType: "PDF",
+      extractionType: sparsePdfText ? "vision" : "text",
+      pageCount: pdf.pageCount,
+      selectedPageCount: readPageNumbers.length,
+      selectedTextPageNumbers: selectedPages.map((page) => page.pageNumber),
+      visionPageNumbers: sparsePdfText ? readPageNumbers : [],
+      sparseText: sparsePdfText,
+      textPageCount: pdf.pages.filter((page) => String(page.text || "").trim().length >= IM_SPARSE_PAGE_TEXT_LENGTH).length,
+      analysisFlow: pdf.analysisDiagnostics?.analysisFlow || "single",
+      chunkCount: pdf.analysisDiagnostics?.chunkCount || 1,
+      chunkLabels: pdf.analysisDiagnostics?.chunkLabels || [],
+      textLimit: getImTextLimit(policy, "pdf")
+    }
   };
 }
 
@@ -927,18 +1022,153 @@ async function analyzeImText(text, policy, fileMeta) {
   return parseGeminiJson(response);
 }
 
+async function analyzeImTextWithStaging(chunks, policy, fileMeta) {
+  const normalizedChunks = asArray(chunks).filter((chunk) => String(chunk?.text || "").trim());
+  if (normalizedChunks.length <= 1) {
+    const chunk = normalizedChunks[0] || { label: "전체", text: "" };
+    return {
+      analysis: await analyzeImText(chunk.text, policy, fileMeta),
+      diagnostics: { analysisFlow: "single", chunkCount: 1, chunkLabels: [chunk.label || "전체"] }
+    };
+  }
+  const partials = [];
+  for (const chunk of normalizedChunks) {
+    const response = await callGeminiText(
+      buildImChunkAnalysisPrompt(chunk.text, policy, fileMeta, chunk.label || "부분"),
+      { json: true, temperature: 0.12 }
+    );
+    partials.push({ label: chunk.label || "부분", pageNumbers: chunk.pageNumbers || [], analysis: parseGeminiJson(response) });
+  }
+  const synthesis = await callGeminiText(buildImSynthesisPrompt(partials, policy, fileMeta), { json: true, temperature: 0.12 });
+  return {
+    analysis: parseGeminiJson(synthesis),
+    diagnostics: {
+      analysisFlow: "two_stage_text",
+      chunkCount: partials.length,
+      chunkLabels: partials.map((item) => item.label)
+    }
+  };
+}
+
+async function analyzeImVisionWithStaging(images, policy, fileMeta) {
+  const batches = buildVisionAnalysisBatches(images);
+  if (batches.length <= 1) {
+    const prompt = buildImVisionPrompt(policy, fileMeta, batches[0]?.label || "");
+    const text = await callGeminiVision(images, prompt);
+    return {
+      analysis: parseGeminiJson(text),
+      diagnostics: { analysisFlow: "single_vision", chunkCount: 1, chunkLabels: [batches[0]?.label || "전체 이미지"] }
+    };
+  }
+  const partials = [];
+  for (const batch of batches) {
+    const prompt = buildImVisionPrompt(policy, fileMeta, `${batch.label} 범위만 먼저 요약하세요. 전체 통합은 다음 단계에서 수행됩니다.`);
+    const text = await callGeminiVision(batch.images, prompt);
+    partials.push({ label: batch.label, pageNumbers: batch.pageNumbers, analysis: parseGeminiJson(text) });
+  }
+  const synthesis = await callGeminiText(buildImSynthesisPrompt(partials, policy, fileMeta), { json: true, temperature: 0.12 });
+  return {
+    analysis: parseGeminiJson(synthesis),
+    diagnostics: {
+      analysisFlow: "two_stage_vision",
+      chunkCount: partials.length,
+      chunkLabels: partials.map((item) => item.label)
+    }
+  };
+}
+
+function buildTextAnalysisChunks(text = "") {
+  const cleanText = String(text || "").trim();
+  if (!cleanText) return [{ label: "전체 텍스트", text: "" }];
+  const maxChunkLength = 45000;
+  const maxChunks = 4;
+  if (cleanText.length <= maxChunkLength) return [{ label: "전체 텍스트", text: cleanText }];
+  const chunks = [];
+  for (let start = 0; start < cleanText.length && chunks.length < maxChunks; start += maxChunkLength) {
+    chunks.push({
+      label: `텍스트 묶음 ${chunks.length + 1}`,
+      text: cleanText.slice(start, start + maxChunkLength)
+    });
+  }
+  return chunks;
+}
+
+function buildPageAnalysisChunks(pages = []) {
+  const selectedPages = asArray(pages).filter(Boolean);
+  if (!selectedPages.length) return [{ label: "선택 페이지", text: "" }];
+  const targetChunkLength = 48000;
+  const maxChunks = 4;
+  const chunks = [];
+  let currentPages = [];
+  let currentText = "";
+  const flush = () => {
+    if (!currentPages.length) return;
+    const pageNumbers = currentPages.map((page) => page.pageNumber);
+    chunks.push({
+      label: formatPageRangeLabel(pageNumbers),
+      pageNumbers,
+      text: currentText.trim()
+    });
+    currentPages = [];
+    currentText = "";
+  };
+  selectedPages.forEach((page) => {
+    const pageText = `\n\n[Page ${page.pageNumber}]\n${page.text || ""}`;
+    const wouldOverflow = currentText.length + pageText.length > targetChunkLength;
+    if (wouldOverflow && currentPages.length && chunks.length < maxChunks - 1) flush();
+    currentPages.push(page);
+    currentText += pageText;
+  });
+  flush();
+  return chunks.length ? chunks : [{ label: "선택 페이지", text: "" }];
+}
+
+function buildVisionAnalysisBatches(images = []) {
+  const list = asArray(images).filter(Boolean);
+  if (!list.length) return [{ label: "전체 이미지", images: [], pageNumbers: [] }];
+  const batchSize = 8;
+  const batches = [];
+  for (let start = 0; start < list.length; start += batchSize) {
+    const batchImages = list.slice(start, start + batchSize);
+    const pageNumbers = batchImages.map((image) => extractPageNumberFromLabel(image.label)).filter(Boolean);
+    batches.push({
+      label: pageNumbers.length ? formatPageRangeLabel(pageNumbers) : `이미지 묶음 ${batches.length + 1}`,
+      pageNumbers,
+      images: batchImages
+    });
+  }
+  return batches;
+}
+
+function extractPageNumberFromLabel(label = "") {
+  const match = String(label || "").match(/Page\s+(\d+)/i);
+  return match ? Number(match[1]) : null;
+}
+
+function formatPageRangeLabel(pageNumbers = []) {
+  const unique = mergeNumberList(pageNumbers);
+  if (!unique.length) return "페이지 묶음";
+  if (unique.length === 1) return `Page ${unique[0]}`;
+  return `Pages ${unique[0]}-${unique[unique.length - 1]}`;
+}
+
+function mergeNumberList(items = []) {
+  return [...new Set(asArray(items).map(Number).filter((item) => Number.isFinite(item)))].sort((a, b) => a - b);
+}
+
 function chooseFocusedPolicy({ file, text, pageCount }) {
   const reasons = [];
-  if (file.size > 8 * 1024 * 1024) reasons.push("파일 용량이 큼");
-  if (pageCount > 40) reasons.push("페이지 수가 많음");
-  if ((text || "").length > 60000) reasons.push("추출 텍스트가 김");
+  const extractedLength = (text || "").length;
+  if (file.size > 25 * 1024 * 1024) reasons.push("파일 용량이 매우 큼");
+  if (pageCount > IM_STANDARD_MAX_PAGES) reasons.push("페이지 수가 매우 많음");
+  if (extractedLength > 120000) reasons.push("추출 텍스트가 매우 김");
   if (state.documentSettings.pageReadMode === "focused") reasons.push("사용자가 Focused skim mode 선택");
   if (state.documentSettings.pageReadMode === "custom") reasons.push("사용자 지정 페이지 우선");
   const shouldFocus = state.documentSettings.pageReadMode !== "auto" || reasons.length > 0;
   return {
     mode: shouldFocus ? "focused" : "standard",
     reasons,
-    warning: shouldFocus ? "큰 IM 또는 지정 조건에 따라 핵심 정보 중심으로만 읽었습니다." : ""
+    warning: shouldFocus ? "큰 IM이라 핵심 페이지와 균형 샘플링 페이지를 함께 읽었습니다." : ""
   };
 }
 
@@ -948,17 +1178,76 @@ function selectPages(pages, policy) {
     const custom = parsePageRanges(state.documentSettings.customPages, pages.length);
     if (custom.length) return custom.map((pageNumber) => pages[pageNumber - 1]).filter(Boolean);
   }
-  if (policy.mode !== "focused") return pages.slice(0, 60);
+  if (policy.mode !== "focused") return pages.slice(0, Math.min(IM_STANDARD_MAX_PAGES, pages.length));
 
-  const firstPages = pages.slice(0, Math.min(5, pages.length));
+  const sparseText = isSparsePdfText(pages);
+  const maxPages = sparseText ? IM_SPARSE_PDF_MAX_PAGES : IM_FOCUSED_MAX_PAGES;
+  const firstPages = pages.slice(0, Math.min(sparseText ? 8 : 6, pages.length));
   const keywordPages = [...pages]
     .map((page) => ({ ...page, score: scorePage(page.text) }))
     .sort((a, b) => b.score - a.score)
     .filter((page) => page.score > 0)
-    .slice(0, 10);
+    .slice(0, sparseText ? 8 : 16);
+  const balancedPages = pickEvenlySpacedPages(pages, sparseText ? 12 : 10);
+  const lastPages = pages.slice(-3);
   const map = new Map();
-  [...firstPages, ...keywordPages].forEach((page) => map.set(page.pageNumber, page));
-  return [...map.values()].sort((a, b) => a.pageNumber - b.pageNumber).slice(0, 14);
+  [...firstPages, ...keywordPages, ...balancedPages, ...lastPages].forEach((page) => map.set(page.pageNumber, page));
+  return [...map.values()].sort((a, b) => a.pageNumber - b.pageNumber).slice(0, maxPages);
+}
+
+function getImTextLimit(policy, sourceType = "pdf") {
+  const limits = sourceType === "text" ? IM_TEXT_FILE_LIMITS : IM_TEXT_LIMITS;
+  return limits[policy.mode] || limits.standard;
+}
+
+function isSparsePdfText(pages = []) {
+  if (!pages.length) return true;
+  const lengths = pages.map((page) => String(page.text || "").trim().length);
+  const total = lengths.reduce((sum, length) => sum + length, 0);
+  const textPages = lengths.filter((length) => length >= IM_SPARSE_PAGE_TEXT_LENGTH).length;
+  return total < Math.max(IM_SPARSE_TOTAL_TEXT_LENGTH, pages.length * 80)
+    || textPages <= Math.max(2, Math.ceil(pages.length * 0.15));
+}
+
+function pickEvenlySpacedPages(pages = [], count = 0) {
+  return pickEvenlySpacedPageNumbers(pages.length, count)
+    .map((pageNumber) => pages[pageNumber - 1])
+    .filter(Boolean);
+}
+
+function pickEvenlySpacedPageNumbers(maxPage, count) {
+  const total = Number(maxPage) || 0;
+  const desired = Math.max(0, Number(count) || 0);
+  if (!total || !desired) return [];
+  if (total <= desired) return Array.from({ length: total }, (_, index) => index + 1);
+  if (desired === 1) return [1];
+  const pages = new Set();
+  for (let index = 0; index < desired; index += 1) {
+    pages.add(Math.max(1, Math.min(total, Math.round(1 + ((total - 1) * index) / (desired - 1)))));
+  }
+  return [...pages].sort((a, b) => a - b);
+}
+
+function selectVisionPageNumbers(selectedPages = [], pageCount = 0) {
+  const selectedNumbers = selectedPages.map((page) => page.pageNumber).filter(Boolean);
+  const balancedNumbers = pickEvenlySpacedPageNumbers(pageCount, Math.min(8, IM_VISION_MAX_PAGES));
+  const tailNumbers = [pageCount - 1, pageCount].filter((pageNumber) => pageNumber >= 1);
+  const candidates = [
+    ...selectedNumbers.slice(0, 8),
+    ...balancedNumbers,
+    ...tailNumbers,
+    ...selectedNumbers
+  ];
+  const seen = new Set();
+  return candidates
+    .filter((pageNumber) => pageNumber >= 1 && pageNumber <= pageCount)
+    .filter((pageNumber) => {
+      if (seen.has(pageNumber)) return false;
+      seen.add(pageNumber);
+      return true;
+    })
+    .slice(0, IM_VISION_MAX_PAGES)
+    .sort((a, b) => a - b);
 }
 
 function scorePage(text = "") {
@@ -1005,7 +1294,7 @@ async function renderPdfPages(file, pageNumbers) {
     const context = canvas.getContext("2d");
     await page.render({ canvasContext: context, viewport }).promise;
     const dataUrl = canvas.toDataURL("image/jpeg", 0.72);
-    images.push({ mimeType: "image/jpeg", data: dataUrl.split(",")[1] });
+    images.push({ mimeType: "image/jpeg", data: dataUrl.split(",")[1], label: `[PDF Page ${pageNumber}]` });
   }
   return images;
 }
@@ -1342,7 +1631,7 @@ async function fetchMarketContext() {
   const prompt = `
 기관 LP의 운용사 미팅 준비를 위해 최신 시장, 뉴스, 정책, 규제, 리스크 맥락을 조사해 JSON으로만 답하세요.
 사용자의 "딜 / 자산 메모"에는 자산 개요, 지역, 보증 구조, 과거 이슈, 우려사항, 잠정 판단이 섞여 있을 수 있습니다. 이 메모를 검색 키워드와 리스크 분석의 핵심 단서로 사용하세요.
-한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.
+${commonKoreanOutputInstruction()}
 입력값의 fundName은 펀드명뿐 아니라 직접대출명, PF 대출명, 단일 자산 거래명일 수 있습니다. 시장 맥락과 검색 키워드를 만들 때 펀드형 투자와 직접대출/단일 거래 가능성을 모두 열어두세요.
 
 검색 기준일: ${searchDateText}
@@ -1382,14 +1671,14 @@ ${JSON.stringify(state.imProcessingResult?.imAnalysis || {}, null, 2)}
 JSON 스키마:
 {
   "summary": "날짜와 출처가 확인된 최신 근거만 사용한 핵심 시장 맥락 3문장 이내",
-  "directDealEvents": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "기사/공시/보도자료명", "fact": "운용사/펀드/대출/거래/프로젝트에 직접 연결되는 확인된 사실", "relevance": "이번 건과의 직접 관련성"}],
-  "keyMarketTrends": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "자료/기사명", "fact": "확인된 시장 동향", "relevance": "이번 건과의 관련성"}],
-  "recentEvents": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "기사/공시/자료명", "fact": "directDealEvents와 같은 직접 관련 이벤트만 작성", "relevance": "이번 건과의 직접 관련성"}],
-  "policyRegulatoryNotes": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "정책/규제/자료명", "fact": "확인된 정책/규제 내용", "relevance": "이번 건과의 관련성"}],
-  "riskSignals": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "근거 자료명", "fact": "이번 건에서 확인해야 할 리스크 신호", "relevance": "LP 확인 포인트"}],
+  "directDealEvents": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "기사/공시/보도자료명", "url": "가능하면 출처 URL", "fact": "운용사/펀드/대출/거래/프로젝트에 직접 연결되는 확인된 사실", "relevance": "이번 건과의 직접 관련성"}],
+  "keyMarketTrends": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "자료/기사명", "url": "가능하면 출처 URL", "fact": "확인된 시장 동향", "relevance": "이번 건과의 관련성"}],
+  "recentEvents": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "기사/공시/자료명", "url": "가능하면 출처 URL", "fact": "directDealEvents와 같은 직접 관련 이벤트만 작성", "relevance": "이번 건과의 직접 관련성"}],
+  "policyRegulatoryNotes": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "정책/규제/자료명", "url": "가능하면 출처 URL", "fact": "확인된 정책/규제 내용", "relevance": "이번 건과의 관련성"}],
+  "riskSignals": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "근거 자료명", "url": "가능하면 출처 URL", "fact": "이번 건에서 확인해야 할 리스크 신호", "relevance": "LP 확인 포인트"}],
   "lpQuestions": ["최대 5개. 위 최신 근거에서 파생된 LP 질문"],
   "followUpRequests": ["최대 3개. 시장/정책 확인용 추가 요청자료"],
-  "sources": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "출처 제목", "note": "이번 건과의 관련성"}],
+  "sources": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "출처 제목", "url": "가능하면 출처 URL", "note": "이번 건과의 관련성"}],
   "sourceQuality": "검색 기준일 기준 최근 1년 내 날짜가 확인된 구체적 자료 충분/부족. 부족하면 어떤 축이 부족한지 설명"
 }`;
   let detailedContext = null;
@@ -1445,13 +1734,13 @@ JSON 스키마:
 {
   "summary": "날짜와 출처가 확인된 기본 시장동향 3문장 이내",
   "directDealEvents": [],
-  "keyMarketTrends": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "자료/기사명", "fact": "지역·자산군 기준으로 확인된 시장 동향", "relevance": "이번 건의 Q&A에 주는 시사점"}],
+  "keyMarketTrends": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "자료/기사명", "url": "가능하면 출처 URL", "fact": "지역·자산군 기준으로 확인된 시장 동향", "relevance": "이번 건의 Q&A에 주는 시사점"}],
   "recentEvents": [],
-  "policyRegulatoryNotes": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "정책/규제/시장자료명", "fact": "확인된 정책/규제/시장 환경", "relevance": "이번 건과의 관련성"}],
-  "riskSignals": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "근거 자료명", "fact": "Q&A에 반영해야 할 시장 리스크 신호", "relevance": "LP 확인 포인트"}],
+  "policyRegulatoryNotes": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "정책/규제/시장자료명", "url": "가능하면 출처 URL", "fact": "확인된 정책/규제/시장 환경", "relevance": "이번 건과의 관련성"}],
+  "riskSignals": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "근거 자료명", "url": "가능하면 출처 URL", "fact": "Q&A에 반영해야 할 시장 리스크 신호", "relevance": "LP 확인 포인트"}],
   "lpQuestions": ["기본 시장동향에서 파생되는 GP 질의 최대 5개"],
   "followUpRequests": ["시장/정책 확인용 추가 요청자료 최대 3개"],
-  "sources": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "출처 제목", "note": "이번 건과의 관련성"}],
+  "sources": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "출처 제목", "url": "가능하면 출처 URL", "note": "이번 건과의 관련성"}],
   "sourceQuality": "기본 시장동향 검색 근거 충분/부족"
 }`;
 }
@@ -1459,12 +1748,16 @@ JSON 스키마:
 function mergeMarketContexts(primary = null, fallback = null) {
   if (!primary) return fallback || {};
   if (!fallback || !hasAnyMarketEvidence(fallback)) return primary;
+  const directDealEvents = mergeMarketItemLists(
+    getDirectMarketEvents(primary),
+    getDirectMarketEvents(fallback)
+  ).slice(0, 5);
   const merged = {
     ...primary,
     summary: primary.summary || fallback.summary || "",
-    directDealEvents: mergeMarketItemLists(primary.directDealEvents, fallback.directDealEvents).slice(0, 5),
+    directDealEvents,
     keyMarketTrends: mergeMarketItemLists(primary.keyMarketTrends, fallback.keyMarketTrends).slice(0, 5),
-    recentEvents: mergeMarketItemLists(primary.recentEvents, fallback.recentEvents).slice(0, 5),
+    recentEvents: directDealEvents,
     policyRegulatoryNotes: mergeMarketItemLists(primary.policyRegulatoryNotes, fallback.policyRegulatoryNotes).slice(0, 5),
     riskSignals: mergeMarketItemLists(primary.riskSignals, fallback.riskSignals).slice(0, 5),
     lpQuestions: mergeTextLists([...asArray(primary.lpQuestions), ...asArray(fallback.lpQuestions)]).slice(0, 5),
@@ -1477,6 +1770,10 @@ function mergeMarketContexts(primary = null, fallback = null) {
     baselineGroundingDiagnostics: fallback.groundingDiagnostics || null
   };
   return merged;
+}
+
+function getDirectMarketEvents(context = {}) {
+  return mergeMarketItemLists(context.directDealEvents, context.recentEvents);
 }
 
 function mergeMarketItemLists(...lists) {
@@ -1508,7 +1805,9 @@ function buildMarketContextFallback(error) {
     sourceQuality: message,
     groundingDiagnostics: {
       model: lastSearchGroundingModelUsed || SEARCH_GROUNDING_MODEL,
+      webSearchQueries: [],
       sourceCount: 0,
+      searchTraceAvailable: false,
       droppedCount: 0,
       failed: true,
       errorMessage: error?.message || message,
@@ -1520,7 +1819,7 @@ function buildMarketContextFallback(error) {
 function formatMarketGroundingFailureMessage(error) {
   const raw = `${error?.message || ""} ${error?.gemini?.rawMessage || ""}`;
   if (/no_grounding_metadata|without grounding chunks|grounding metadata|출처 메타데이터/i.test(raw)) {
-    return "검색 그라운딩을 요청했지만 모델 응답에 출처 메타데이터가 붙지 않아 최신 뉴스/시장 근거를 반영하지 않았습니다. 앱은 같은 2.5 모델에서 검색 강제 재시도 후 후순위 모델로 넘어갑니다.";
+    return "검색 그라운딩을 요청했지만 모델 응답에 검색 메타데이터가 붙지 않아 최신 뉴스/시장 근거를 반영하지 않았습니다. 앱은 설정 모델과 후순위 검색 모델에서 검색 강제 재시도를 수행합니다.";
   }
   if (/429|RESOURCE_EXHAUSTED|quota/i.test(raw)) {
     return "검색 그라운딩 호출이 API 한도 문제로 실패해 최신 뉴스/시장 근거를 반영하지 않았습니다.";
@@ -1535,14 +1834,25 @@ function sanitizeGroundedMarketContext(context = {}, groundingMetadata = null) {
   const chunks = asArray(groundingMetadata?.groundingChunks)
     .map((chunk) => chunk.web || chunk)
     .filter(Boolean);
-  const groundedText = chunks.map((chunk) => [
+  const webSearchQueries = asArray(groundingMetadata?.webSearchQueries);
+  const searchTraceAvailable = hasSearchExecutionMetadata(groundingMetadata);
+  const searchEntryPointText = extractSearchEntryPointText(groundingMetadata?.searchEntryPoint);
+  const supportText = asArray(groundingMetadata?.groundingSupports)
+    .map((support) => support?.segment?.text)
+    .filter(Boolean)
+    .join("\n");
+  const groundedText = [
+    chunks.map((chunk) => [
     chunk.title,
     chunk.uri,
     chunk.domain,
     chunk.web?.title,
     chunk.web?.uri
-  ].filter(Boolean).join(" ")).join("\n");
-  const webSearchQueries = asArray(groundingMetadata?.webSearchQueries);
+    ].filter(Boolean).join(" ")).join("\n"),
+    webSearchQueries.join("\n"),
+    searchEntryPointText,
+    supportText
+  ].filter(Boolean).join("\n");
   const groundingAvailable = chunks.length > 0;
   const protectedNames = [
     state.meeting.managerName,
@@ -1558,23 +1868,24 @@ function sanitizeGroundedMarketContext(context = {}, groundingMetadata = null) {
   ].map(normalizeProtectedEntityName)).filter((name) => name.length >= 3);
 
   const dropped = [];
-  const sanitizeItems = (items, fieldName, options = {}) => asArray(items).filter((item) => {
-    const check = validateGroundedMarketItem(item, { groundingAvailable, groundedText, protectedNames, directEntityNames, ...options });
+  const sanitizeItems = (items, fieldName, options = {}) => {
+    const sanitizedItems = [];
+    asArray(items).forEach((item) => {
+    const check = validateGroundedMarketItem(item, { groundingAvailable, searchTraceAvailable, groundedText, protectedNames, directEntityNames, ...options });
     if (!check.ok) dropped.push(`${fieldName}: ${check.reason}`);
-    return check.ok;
-  }).slice(0, fieldName === "sources" ? 8 : 5);
+      if (check.ok) sanitizedItems.push(enrichMarketItemWithGroundingUrl(item, chunks));
+    });
+    return sanitizedItems.slice(0, fieldName === "sources" ? 8 : 5);
+  };
 
-  const directDealEvents = sanitizeItems([
-    ...asArray(context.directDealEvents),
-    ...asArray(context.recentEvents)
-  ], "직접 관련 뉴스", { directOnly: true });
+  const directDealEvents = sanitizeItems(getDirectMarketEvents(context), "직접 관련 뉴스", { directOnly: true });
   const relatedPartySignals = sanitizeItems([
     ...asArray(context.directDealEvents),
     ...asArray(context.recentEvents),
     ...asArray(context.riskSignals)
   ], "관계자 리스크 신호", { relatedPartyOk: true });
   const sanitized = {
-    summary: groundingAvailable ? cleanMarketSummary(context.summary, protectedNames, groundedText) : "",
+    summary: searchTraceAvailable ? cleanMarketSummary(context.summary, protectedNames, groundedText, groundingAvailable) : "",
     directDealEvents,
     keyMarketTrends: sanitizeItems(context.keyMarketTrends || context.trends, "시장 동향"),
     recentEvents: directDealEvents,
@@ -1586,22 +1897,88 @@ function sanitizeGroundedMarketContext(context = {}, groundingMetadata = null) {
     sourceQuality: context.sourceQuality || ""
   };
 
-  if (!groundingAvailable) {
+  if (!searchTraceAvailable) {
     sanitized.sourceQuality = "검색 그라운딩 메타데이터가 없어 최신 뉴스/시장 근거를 보고서에 반영하지 않음.";
   } else if (!hasAnyMarketEvidence(sanitized)) {
     sanitized.summary = "";
     sanitized.sourceQuality = "검색은 실행되었으나 검색 기준일 기준 최근 1년 내 날짜·출처 기준을 통과한 시장/뉴스 근거가 부족해 보고서에 제한적으로 반영함.";
   } else {
     sanitized.sourceQuality = buildSourceQualitySummary(sanitized, dropped);
+    if (!groundingAvailable) {
+      sanitized.sourceQuality += " 단, 이번 응답은 검색어 메타데이터는 확인됐지만 출처 chunk가 비어 있어 날짜·출처·제목이 있는 항목만 제한적으로 반영했습니다.";
+    }
   }
   sanitized.groundingDiagnostics = {
     model: lastSearchGroundingModelUsed || SEARCH_GROUNDING_MODEL,
     webSearchQueries,
     sourceCount: chunks.length,
+    searchTraceAvailable,
     droppedCount: dropped.length,
     directEntityNames
   };
   return sanitized;
+}
+
+function extractSearchEntryPointText(searchEntryPoint = null) {
+  const rendered = String(searchEntryPoint?.renderedContent || "");
+  const sdkBlob = String(searchEntryPoint?.sdkBlob || "");
+  return [
+    rendered.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
+    decodeSearchEntryPointSdkBlob(sdkBlob)
+  ].filter(Boolean).join("\n");
+}
+
+function enrichMarketItemWithGroundingUrl(item, chunks = []) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+  const existingUrl = normalizeSourceUrl(item.url || item.sourceUrl || item.uri || item.link);
+  return {
+    ...item,
+    ...(existingUrl ? { url: existingUrl } : {}),
+    ...(!existingUrl ? { url: findGroundingUrlForItem(item, chunks) } : {})
+  };
+}
+
+function findGroundingUrlForItem(item, chunks = []) {
+  const text = normalizeFactKey([
+    item.source,
+    item.title || item.headline || item.name,
+    item.fact || item.note || item.summary
+  ].filter(Boolean).join(" "));
+  if (!text) return "";
+  const candidates = asArray(chunks)
+    .map((chunk) => ({
+      title: chunk.title || chunk.web?.title || "",
+      uri: chunk.uri || chunk.web?.uri || "",
+      domain: chunk.domain || chunk.web?.domain || ""
+    }))
+    .filter((chunk) => chunk.uri || chunk.title || chunk.domain);
+  const matched = candidates.find((chunk) => {
+    const sourceKey = normalizeFactKey(item.source || "");
+    const titleKey = normalizeFactKey(item.title || item.headline || item.name || "");
+    const chunkKey = normalizeFactKey([chunk.title, chunk.domain, chunk.uri].filter(Boolean).join(" "));
+    return (sourceKey && chunkKey.includes(sourceKey))
+      || (titleKey && (chunkKey.includes(titleKey) || titleKey.includes(chunkKey)));
+  }) || candidates.find((chunk) => {
+    const chunkKey = normalizeFactKey([chunk.title, chunk.domain, chunk.uri].filter(Boolean).join(" "));
+    const tokens = String(text).match(/[a-z0-9가-힣]{4,}/gi) || [];
+    return chunkKey && tokens.some((token) => chunkKey.includes(token));
+  });
+  return normalizeSourceUrl(matched?.uri || "");
+}
+
+function normalizeSourceUrl(value = "") {
+  const text = String(value || "").trim();
+  if (!/^https?:\/\//i.test(text)) return "";
+  return text;
+}
+
+function decodeSearchEntryPointSdkBlob(sdkBlob = "") {
+  if (!sdkBlob || typeof atob !== "function") return "";
+  try {
+    return atob(sdkBlob).replace(/\s+/g, " ").trim();
+  } catch {
+    return "";
+  }
 }
 
 function buildSourceQualitySummary(context = {}, dropped = []) {
@@ -1638,8 +2015,8 @@ function hasAnyMarketEvidence(context = {}) {
   ].some((items) => asArray(items).length > 0);
 }
 
-function validateGroundedMarketItem(item, { groundingAvailable, groundedText, protectedNames, directEntityNames = [], directOnly = false, relatedPartyOk = false }) {
-  if (!groundingAvailable) return { ok: false, reason: "grounding metadata 없음" };
+function validateGroundedMarketItem(item, { groundingAvailable, searchTraceAvailable, groundedText, protectedNames, directEntityNames = [], directOnly = false, relatedPartyOk = false }) {
+  if (!groundingAvailable && !searchTraceAvailable) return { ok: false, reason: "grounding metadata 없음" };
   const text = formatListItemText(item);
   if (!text.trim()) return { ok: false, reason: "빈 항목" };
   if (/날짜\s*확인\s*필요|출처\s*확인\s*필요|최근\s*자료\s*확인\s*필요/i.test(text)) {
@@ -1657,18 +2034,23 @@ function validateGroundedMarketItem(item, { groundingAvailable, groundedText, pr
     if (isLowReliabilityMarketSource(source, title)) {
       return { ok: false, reason: "출처 신뢰도 낮음" };
     }
-    if (!hasGroundingOverlap(source, title, groundedText, item)) {
+    if (groundingAvailable && !hasGroundingOverlap(source, title, groundedText, item)) {
       return { ok: false, reason: "검색 메타데이터와 출처/제목 불일치" };
     }
   }
   const normalizedText = normalizeProtectedEntityName(text);
   const normalizedGroundedText = normalizeProtectedEntityName(groundedText);
   const mentionedProtectedName = protectedNames.find((name) => normalizedText.includes(name));
-  if (mentionedProtectedName && !normalizedGroundedText.includes(mentionedProtectedName)) {
+  if (groundingAvailable && mentionedProtectedName && !normalizedGroundedText.includes(mentionedProtectedName)) {
     return { ok: false, reason: `고유명사 '${mentionedProtectedName}' 검색근거 없음` };
   }
-  if (directOnly && !hasDirectEntitySupport(text, groundedText, directEntityNames)) {
-    return { ok: false, reason: "직접 관련 고유명사 근거 없음" };
+  if (directOnly) {
+    if (!hasDirectEntityMention(text, directEntityNames)) {
+      return { ok: false, reason: "직접 관련 고유명사 언급 없음" };
+    }
+    if (groundingAvailable && !hasDirectEntitySupport(text, groundedText, directEntityNames)) {
+      return { ok: false, reason: "직접 관련 고유명사 근거 없음" };
+    }
   }
   if (relatedPartyOk && !isRelatedPartyRiskSignal(text, groundedText, directEntityNames)) {
     return { ok: false, reason: "관계자 리스크 신호 아님" };
@@ -1725,9 +2107,18 @@ function hasDirectEntitySupport(itemText, groundedText, directEntityNames) {
   });
 }
 
+function hasDirectEntityMention(itemText, directEntityNames) {
+  const item = normalizeProtectedEntityName(itemText).toLowerCase();
+  return directEntityNames.some((name) => {
+    const normalized = normalizeProtectedEntityName(name).toLowerCase();
+    return normalized.length >= 3 && item.includes(normalized);
+  });
+}
+
 function isLowReliabilityMarketSource(source, title = "") {
   const text = `${source} ${title}`;
-  return /youtube|youtu\.be|유튜브|tiktok|instagram|facebook|reddit|blog|블로그|카페|forum|커뮤니티|\bdaum\b|\bnaver\b|다음|네이버/i.test(text);
+  if (/네이버\s*(블로그|카페)|다음\s*카페|naver\s*blog|naver\s*cafe|daum\s*cafe/i.test(text)) return true;
+  return /youtube|youtu\.be|유튜브|tiktok|instagram|facebook|reddit|blog|블로그|카페|forum|커뮤니티/i.test(text);
 }
 
 function hasGroundingOverlap(source, title, groundedText, item = null) {
@@ -1748,11 +2139,12 @@ function hasGroundingOverlap(source, title, groundedText, item = null) {
   return matches.length >= 1;
 }
 
-function cleanMarketSummary(summary, protectedNames, groundedText) {
+function cleanMarketSummary(summary, protectedNames, groundedText, requireNameGrounding = true) {
   const text = String(summary || "").trim();
   if (!text) return "";
   const normalizedGrounded = normalizeProtectedEntityName(groundedText);
-  const mentionsUnsupportedName = protectedNames.some((name) => normalizeProtectedEntityName(text).includes(name) && !normalizedGrounded.includes(name));
+  const mentionsUnsupportedName = requireNameGrounding
+    && protectedNames.some((name) => normalizeProtectedEntityName(text).includes(name) && !normalizedGrounded.includes(name));
   return mentionsUnsupportedName ? "" : text;
 }
 
@@ -1772,15 +2164,69 @@ function hasReliableMarketDate(value) {
 function normalizeProtectedEntityName(value) {
   return String(value || "")
     .replace(/\s+/g, "")
-    .replace(/[㈜주식회사펀드대출거래제호]/g, "")
+    .replace(/㈜|주식회사|펀드|대출|거래|제\s*\d+\s*호|제호/g, "")
     .trim();
+}
+
+function commonKoreanOutputInstruction() {
+  return "한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.";
+}
+
+function commonDealTypeInstruction() {
+  return `IM이 펀드형 투자자료인지, 직접대출/프로젝트 파이낸싱/단일 자산 거래자료인지 먼저 구분하세요. 직접대출 또는 단일 트랜치 대출이면 fundName에는 대출명 또는 거래명을 넣고, 질문은 펀드 운용전략보다 차주, 담보, 보증, 상환재원, 선순위성, 약정 조건 중심으로 정리하세요.
+검토 유형은 fund 또는 loan 중 하나로 판단하세요. PF 대출, 담보대출, 직접대출, 대출확약, 차주/대주 구조이면 loan입니다. 블라인드펀드, 프로젝트펀드 출자, LP commitment 중심이면 fund입니다.`;
+}
+
+function commonImExtractionRules() {
+  return `우선 추출 항목:
+자산분류, 섹터, 지역, 딜 개요, 관계 플레이어, 주요 리스크 사항, 투자구조, 핵심 숫자, 트랙레코드, 수수료/조건.
+부동산/인프라/복합자산의 sector는 하나로 압축하지 말고 IM에 나온 주요 용도와 섹터를 모두 보존하세요. 예: 공동주택, 오피스텔, 판매시설, 근린생활시설.
+PE/PD의 sector도 여러 개가 있으면 모두 보존하세요. 예: 테크/소프트웨어, 헬스케어/바이오, 소비재/이커머스.
+숫자/조건 정합성도 자연스럽게 점검하세요. 같은 항목의 금리, 수익률, LTV, DSCR, 대출기간, 상환조건, 보증조건, 수수료, 금액이 페이지별로 다르면 keyNumbersToVerify, conflicts, verificationItems, mustAskQuestionsFromIm에 반영하세요.
+당사 검토 약정액은 총 펀드규모/총 대출규모가 아닙니다. "당사", "본 LP", "검토 약정", "출자 검토액" 등으로 명시된 금액이 없으면 commitmentAmount는 빈 값으로 두세요.`;
+}
+
+function imAnalysisJsonSchema() {
+  return `{
+  "fundSnapshot": {
+    "managerName": "",
+    "fundName": "",
+    "targetSize": "펀드 규모",
+    "loanSize": "대출 규모",
+    "investmentPeriod": "투자 기간",
+    "loanMaturity": "대출만기",
+    "targetReturn": "목표 수익률",
+    "loanRate": "대출금리",
+    "commitmentAmount": "당사/본 LP의 검토 약정액. 총 펀드규모나 총 대출규모와 혼동하지 말고, 명시되지 않았으면 빈 값"
+  },
+  "strategySummary": "전략 요약",
+  "keyInvestmentMerits": ["투자 포인트"],
+  "keyRisks": ["리스크"],
+  "keyNumbersToVerify": ["확인해야 할 숫자"],
+  "trackRecordCheckpoints": ["트랙레코드 확인사항"],
+  "mustAskQuestionsFromIm": ["IM 기반 필수 질문"],
+  "followUpRequestsFromIm": ["IM 기반 추가 요청자료"],
+  "autoDetectedFields": {
+    "managerName": "",
+    "fundName": "",
+    "assetClass": "",
+    "region": "",
+    "strategy": "",
+    "sector": "",
+    "capitalType": "",
+    "dealType": "fund 또는 loan",
+    "investmentStructure": ""
+  },
+  "conflicts": [],
+  "verificationItems": []
+}`;
 }
 
 function buildBriefPrompt() {
   return `
 당신은 기관 LP의 대체투자 운용사 미팅을 준비하는 AI 코파일럿입니다.
 아래 입력값을 바탕으로 사전 준비 결과를 JSON으로만 작성하세요.
-한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.
+${commonKoreanOutputInstruction()}
 
 중요 원칙:
 - IM이 있으면 IM 확인 내용을 우선하되, 사용자가 입력한 세팅값은 보정값으로 사용합니다.
@@ -1838,10 +2284,10 @@ ${JSON.stringify(state.marketContext || null, null, 2)}
   },
   "marketContext": {
     "summary": "날짜와 출처가 확인된 시장 맥락 요약",
-    "trends": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "자료명", "fact": "시장 동향", "relevance": "이번 건과의 관련성"}],
-    "newsPolicy": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "뉴스/정책명", "fact": "뉴스/정책/규제 내용", "relevance": "이번 건과의 관련성"}],
-    "riskSignals": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "근거 자료명", "fact": "리스크 신호", "relevance": "LP 확인 포인트"}],
-    "sources": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "출처 제목"}]
+    "trends": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "자료명", "url": "가능하면 출처 URL", "fact": "시장 동향", "relevance": "이번 건과의 관련성"}],
+    "newsPolicy": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "뉴스/정책명", "url": "가능하면 출처 URL", "fact": "뉴스/정책/규제 내용", "relevance": "이번 건과의 관련성"}],
+    "riskSignals": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "근거 자료명", "url": "가능하면 출처 URL", "fact": "리스크 신호", "relevance": "LP 확인 포인트"}],
+    "sources": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "출처 제목", "url": "가능하면 출처 URL"}]
   },
   "expectedQaList": [
     {
@@ -1859,104 +2305,81 @@ ${JSON.stringify(state.marketContext || null, null, 2)}
 }`;
 }
 
-function buildImAnalysisPrompt(text, policy, fileMeta) {
+function buildImChunkAnalysisPrompt(text, policy, fileMeta, chunkLabel) {
   return `
-기관 LP가 운용사 미팅 전에 IM을 빠르게 파악하려고 합니다.
-아래 IM 텍스트를 읽고 JSON으로만 요약하세요.
-한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.
-IM이 펀드형 투자자료인지, 직접대출/프로젝트 파이낸싱/단일 자산 거래자료인지 먼저 구분하세요. 직접대출 또는 단일 트랜치 대출이면 fundName에는 대출명 또는 거래명을 넣고, 질문은 펀드 운용전략보다 차주, 담보, 보증, 상환재원, 선순위성, 약정 조건 중심으로 정리하세요.
-검토 유형은 fund 또는 loan 중 하나로 판단하세요. PF 대출, 담보대출, 직접대출, 대출확약, 차주/대주 구조이면 loan입니다. 블라인드펀드, 프로젝트펀드 출자, LP commitment 중심이면 fund입니다.
+기관 LP가 운용사 미팅 전에 큰 IM을 나누어 읽고 있습니다.
+아래 텍스트는 전체 IM 중 "${chunkLabel}" 범위입니다. 이 범위에서 확인되는 정보만 JSON으로 요약하세요.
+전체 결론을 무리하게 만들지 말고, 이 범위의 사실·숫자·관계자·리스크·질문 후보를 빠짐없이 구조화하세요.
+${commonKoreanOutputInstruction()}
+${commonDealTypeInstruction()}
 
 분석 모드: ${policy.mode}
 파일 정보: ${JSON.stringify(fileMeta)}
+범위: ${chunkLabel}
 
-Focused skim mode일 때는 다음 항목을 최우선으로 봅니다:
-자산분류, 섹터, 지역, 딜 개요, 관계 플레이어, 주요 리스크 사항, 투자구조, 핵심 숫자.
-부동산/인프라/복합자산의 sector는 하나로 압축하지 말고 IM에 나온 주요 용도와 섹터를 모두 보존하세요. 예: 공동주택, 오피스텔, 판매시설, 근린생활시설.
-PE/PD의 sector도 여러 개가 있으면 모두 보존하세요. 예: 테크/소프트웨어, 헬스케어/바이오, 소비재/이커머스.
-숫자/조건 정합성도 자연스럽게 점검하세요. 같은 항목의 금리, 수익률, LTV, DSCR, 대출기간, 상환조건, 보증조건, 수수료, 금액이 페이지별로 다르면 keyNumbersToVerify, conflicts, verificationItems, mustAskQuestionsFromIm에 반영하세요.
-당사 검토 약정액은 총 펀드규모/총 대출규모가 아닙니다. "당사", "본 LP", "검토 약정", "출자 검토액" 등으로 명시된 금액이 없으면 commitmentAmount는 빈 값으로 두세요.
+${commonImExtractionRules()}
 
 IM 텍스트:
 ${text}
 
 응답 JSON 스키마:
-{
-  "fundSnapshot": {
-    "managerName": "",
-    "fundName": "",
-    "targetSize": "펀드 규모",
-    "loanSize": "대출 규모",
-    "investmentPeriod": "투자 기간",
-    "loanMaturity": "대출만기",
-    "targetReturn": "목표 수익률",
-    "loanRate": "대출금리",
-    "commitmentAmount": "당사/본 LP의 검토 약정액. 총 펀드규모나 총 대출규모와 혼동하지 말고, 명시되지 않았으면 빈 값"
-  },
-  "strategySummary": "전략 요약",
-  "keyInvestmentMerits": ["투자 포인트"],
-  "keyRisks": ["리스크"],
-  "keyNumbersToVerify": ["확인해야 할 숫자"],
-  "trackRecordCheckpoints": ["트랙레코드 확인사항"],
-  "mustAskQuestionsFromIm": ["IM 기반 필수 질문"],
-  "followUpRequestsFromIm": ["IM 기반 추가 요청자료"],
-  "autoDetectedFields": {
-    "managerName": "",
-    "fundName": "",
-    "assetClass": "",
-    "region": "",
-    "strategy": "",
-    "sector": "",
-    "capitalType": "",
-    "dealType": "fund 또는 loan",
-    "investmentStructure": ""
-  },
-  "conflicts": [],
-  "verificationItems": []
-}`;
+${imAnalysisJsonSchema()}`;
 }
 
-function buildImVisionPrompt(policy, fileMeta) {
+function buildImSynthesisPrompt(partials, policy, fileMeta) {
   return `
-기관 LP가 운용사 미팅 전에 이미지/PDF IM을 읽으려고 합니다.
-첨부 이미지를 보고 JSON으로만 답하세요.
-한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.
-IM이 펀드형 투자자료인지, 직접대출/프로젝트 파이낸싱/단일 자산 거래자료인지 먼저 구분하세요. 직접대출 또는 단일 트랜치 대출이면 fundName에는 대출명 또는 거래명을 넣고, 질문은 펀드 운용전략보다 차주, 담보, 보증, 상환재원, 선순위성, 약정 조건 중심으로 정리하세요.
-검토 유형은 fund 또는 loan 중 하나로 판단하세요. PF 대출, 담보대출, 직접대출, 대출확약, 차주/대주 구조이면 loan입니다. 블라인드펀드, 프로젝트펀드 출자, LP commitment 중심이면 fund입니다.
+기관 LP가 운용사 미팅 전에 큰 IM을 여러 묶음으로 나누어 읽었습니다.
+아래 부분 요약들을 통합해 최종 IM 분석 JSON을 작성하세요.
+부분 요약 간 숫자, 금리, LTV, DSCR, 만기, 보증조건, 관계자 역할이 다르면 conflicts, keyNumbersToVerify, verificationItems에 남기세요.
+특정 묶음에만 나온 정보라도 딜 판단에 중요하면 누락하지 마세요.
+${commonKoreanOutputInstruction()}
+${commonDealTypeInstruction()}
 
 분석 모드: ${policy.mode}
 파일 정보: ${JSON.stringify(fileMeta)}
 
-우선 추출 항목:
-자산분류, 섹터, 지역, 딜 개요, 관계 플레이어, 주요 리스크 사항, 투자구조, 핵심 숫자, 트랙레코드, 수수료/조건.
-sector는 하나로 압축하지 말고 이미지/표에 나온 주요 용도와 섹터를 모두 보존하세요.
-숫자/조건 정합성도 자연스럽게 점검하세요. 같은 항목의 금리, 수익률, LTV, DSCR, 대출기간, 상환조건, 보증조건, 수수료, 금액이 페이지별로 다르면 keyNumbersToVerify, conflicts, verificationItems, mustAskQuestionsFromIm에 반영하세요.
-당사 검토 약정액은 총 펀드규모/총 대출규모가 아닙니다. "당사", "본 LP", "검토 약정", "출자 검토액" 등으로 명시된 금액이 없으면 commitmentAmount는 빈 값으로 두세요.
+부분 요약:
+${JSON.stringify(partials, null, 2)}
 
 응답 JSON 스키마:
-{
-  "fundSnapshot": {
-    "managerName": "",
-    "fundName": "",
-    "targetSize": "",
-    "loanSize": "",
-    "investmentPeriod": "",
-    "loanMaturity": "",
-    "targetReturn": "",
-    "loanRate": "",
-    "commitmentAmount": ""
-  },
-  "strategySummary": "",
-  "keyInvestmentMerits": [],
-  "keyRisks": [],
-  "keyNumbersToVerify": [],
-  "trackRecordCheckpoints": [],
-  "mustAskQuestionsFromIm": [],
-  "followUpRequestsFromIm": [],
-  "autoDetectedFields": {},
-  "conflicts": [],
-  "verificationItems": []
-}`;
+${imAnalysisJsonSchema()}`;
+}
+
+function buildImAnalysisPrompt(text, policy, fileMeta) {
+  return `
+기관 LP가 운용사 미팅 전에 IM을 빠르게 파악하려고 합니다.
+아래 IM 텍스트를 읽고 JSON으로만 요약하세요.
+${commonKoreanOutputInstruction()}
+${commonDealTypeInstruction()}
+
+분석 모드: ${policy.mode}
+파일 정보: ${JSON.stringify(fileMeta)}
+
+Focused skim mode일 때는 다음 항목을 최우선으로 봅니다:
+${commonImExtractionRules()}
+
+IM 텍스트:
+${text}
+
+응답 JSON 스키마:
+${imAnalysisJsonSchema()}`;
+}
+
+function buildImVisionPrompt(policy, fileMeta, scopeNote = "") {
+  return `
+기관 LP가 운용사 미팅 전에 이미지/PDF IM을 읽으려고 합니다.
+첨부 이미지를 보고 JSON으로만 답하세요.
+${commonKoreanOutputInstruction()}
+${commonDealTypeInstruction()}
+
+분석 모드: ${policy.mode}
+파일 정보: ${JSON.stringify(fileMeta)}
+${scopeNote ? `범위 메모: ${scopeNote}` : ""}
+
+${commonImExtractionRules()}
+
+응답 JSON 스키마:
+${imAnalysisJsonSchema()}`;
 }
 
 async function generateReport() {
@@ -2003,7 +2426,7 @@ function buildReportPrompt() {
 당신은 기관 LP의 운용사 미팅 후속 정리를 돕는 AI 코파일럿입니다.
 사전 분석, 질문별 답변, 내부 메모, 자유 메모, Transcript를 종합해 JSON으로만 답하세요.
 확인되지 않은 내용은 단정하지 말고 "확인 필요"로 표시하세요.
-한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.
+${commonKoreanOutputInstruction()}
 fundName은 펀드명뿐 아니라 직접대출명, PF 대출명, 단일 자산 거래명일 수 있습니다. 직접대출 또는 단일 트랜치 대출이면 보고서 문장에서도 "본 펀드"보다 "본 건", "본 대출", "본 거래"를 우선 사용하세요.
 
 보고서 톤:
@@ -2108,6 +2531,7 @@ async function callGeminiText(prompt, options = {}) {
 async function callGeminiVision(files, prompt) {
   const parts = [{ text: prompt }];
   files.forEach((file) => {
+    if (file.label) parts.push({ text: file.label });
     parts.push({ inline_data: { mime_type: file.mimeType, data: file.data } });
   });
   return callGeminiGenerate({
@@ -2136,6 +2560,10 @@ async function callGeminiWithSearch(prompt) {
         lastSearchGroundingModelUsed = model;
         return response;
       }
+      if (hasSearchExecutionMetadata(response.groundingMetadata)) {
+        lastSearchGroundingModelUsed = model;
+        return response;
+      }
       failures.push({
         model,
         reason: "no_grounding_metadata",
@@ -2161,7 +2589,10 @@ async function callGeminiWithSearch(prompt) {
 function buildGeminiSearchRequestBody(prompt) {
   return {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
-    tools: [{ google_search: {} }]
+    tools: [{ google_search: {} }],
+    generationConfig: {
+      temperature: 0.05
+    }
   };
 }
 
@@ -2178,6 +2609,7 @@ ${prompt}`;
 
 function buildSearchGroundingModelCandidates() {
   return [
+    runtimeConfig.model,
     SEARCH_GROUNDING_MODEL,
     ...SEARCH_GROUNDING_MODEL_CANDIDATES
   ]
@@ -2196,6 +2628,12 @@ function isLikelySearchGroundingModel(model) {
 
 function hasUsableGroundingMetadata(metadata) {
   return asArray(metadata?.groundingChunks).length > 0;
+}
+
+function hasSearchExecutionMetadata(metadata) {
+  return asArray(metadata?.webSearchQueries).length > 0
+    || Boolean(metadata?.searchEntryPoint?.renderedContent)
+    || Boolean(metadata?.searchEntryPoint?.sdkBlob);
 }
 
 function shouldTryNextSearchGroundingModel(error) {
@@ -2217,7 +2655,7 @@ function buildSearchGroundingFailureInfo(failures = []) {
     statusText: "SEARCH_GROUNDING_FAILED",
     rawMessage: details,
     reason: "search_grounding_failed",
-    message: "검색 그라운딩을 실행했지만 출처 메타데이터를 확보하지 못했습니다. 2.5 모델은 검색 강제 재시도까지 수행했고, 후순위 모델도 실패했습니다."
+    message: "검색 그라운딩을 실행했지만 검색 메타데이터를 확보하지 못했습니다. 설정 모델과 후순위 검색 모델에서 검색 강제 재시도까지 수행했으나 실패했습니다."
   };
 }
 
@@ -2714,26 +3152,33 @@ function extractUserLoanRate(text = "") {
 function normalizeBriefMarketContext(context = {}) {
   const external = state.marketContext || {};
   if (external.groundingDiagnostics || asArray(external.keyMarketTrends).length || asArray(external.recentEvents).length || asArray(external.policyRegulatoryNotes).length || asArray(external.riskSignals).length) {
+    const directDealEvents = getDirectMarketEvents(external);
     return {
       summary: external.summary || "",
-      directDealEvents: asArray(external.directDealEvents || external.recentEvents),
+      directDealEvents,
+      recentEvents: directDealEvents,
       trends: asArray(external.keyMarketTrends),
       newsPolicy: asArray(external.policyRegulatoryNotes),
       riskSignals: asArray(external.riskSignals),
       sources: asArray(external.sources),
-      sourceQuality: external.sourceQuality || ""
+      sourceQuality: external.sourceQuality || "",
+      groundingDiagnostics: external.groundingDiagnostics || null
     };
   }
+  const contextDirectEvents = getDirectMarketEvents(context);
+  const directDealEvents = contextDirectEvents.length ? contextDirectEvents : getDirectMarketEvents(external);
   return {
     summary: context.summary || external.summary || "",
-    directDealEvents: asArray(context.directDealEvents).length ? context.directDealEvents : asArray(external.directDealEvents || external.recentEvents),
+    directDealEvents,
+    recentEvents: directDealEvents,
     trends: asArray(context.trends).length ? context.trends : asArray(external.keyMarketTrends),
     newsPolicy: asArray(context.newsPolicy).length
       ? context.newsPolicy
       : asArray(external.policyRegulatoryNotes),
     riskSignals: asArray(context.riskSignals).length ? context.riskSignals : asArray(external.riskSignals),
     sources: asArray(context.sources).length ? context.sources : asArray(external.sources),
-    sourceQuality: context.sourceQuality || external.sourceQuality || ""
+    sourceQuality: context.sourceQuality || external.sourceQuality || "",
+    groundingDiagnostics: context.groundingDiagnostics || external.groundingDiagnostics || null
   };
 }
 
@@ -3022,20 +3467,29 @@ function renderMarketEvidenceItem(item) {
   const title = item.title || item.headline || item.name || "";
   const fact = item.fact || item.note || item.summary || item.content || item.text || "";
   const relevance = item.relevance || item.implication || item.lpView || "";
+  const url = normalizeSourceUrl(item.url || item.sourceUrl || item.uri || item.link || "");
+  const sourceText = url
+    ? `<a href="${escapeAttribute(url)}" target="_blank" rel="noopener noreferrer" class="text-brand-700 underline decoration-brand-200 underline-offset-2">${escapeHtml(source || "출처 열기")}</a>`
+    : escapeHtml(source);
+  const titleText = title
+    ? (url
+      ? `<a href="${escapeAttribute(url)}" target="_blank" rel="noopener noreferrer" class="text-sm font-extrabold leading-5 text-slate-900 underline decoration-slate-300 underline-offset-2">${escapeHtml(title)}</a>`
+      : `<div class="text-sm font-extrabold leading-5 text-slate-900">${escapeHtml(title)}</div>`)
+    : "";
   return `
     <div class="rounded-md border border-slate-200 bg-slate-50 p-3">
       <div class="mb-1 flex flex-wrap items-center gap-2 text-[11px] font-bold text-slate-500">
         <span class="rounded bg-white px-2 py-0.5 text-slate-700">${escapeHtml(date)}</span>
-        <span>${escapeHtml(source)}</span>
+        <span>${sourceText}</span>
       </div>
-      ${title ? `<div class="text-sm font-extrabold leading-5 text-slate-900">${escapeHtml(title)}</div>` : ""}
+      ${titleText}
       ${fact ? `<div class="mt-1 text-sm leading-6 text-slate-700">${escapeHtml(fact)}</div>` : ""}
       ${relevance ? `<div class="mt-1 text-xs leading-5 text-slate-500">관련성: ${escapeHtml(relevance)}</div>` : ""}
     </div>`;
 }
 
 function renderMarketContext(context = {}) {
-  const directDealEvents = asArray(context.directDealEvents || context.recentEvents);
+  const directDealEvents = getDirectMarketEvents(context);
   const trends = asArray(context.trends || context.keyMarketTrends);
   const newsPolicy = asArray(context.newsPolicy).length
     ? context.newsPolicy
@@ -3053,7 +3507,39 @@ function renderMarketContext(context = {}) {
       <div class="mb-2 text-xs font-extrabold text-slate-500">출처</div>
       ${renderMarketEvidenceList(sources)}
     </div>` : ""}
-    ${context.sourceQuality ? `<p class="mt-3 text-xs leading-5 text-slate-500">출처 품질: ${escapeHtml(context.sourceQuality)}</p>` : ""}`;
+    ${context.sourceQuality ? `<p class="mt-3 text-xs leading-5 text-slate-500">출처 품질: ${escapeHtml(context.sourceQuality)}</p>` : ""}
+    ${renderMarketDiagnostics(context.groundingDiagnostics)}`;
+}
+
+function renderMarketDiagnostics(diagnostics = null) {
+  if (!diagnostics) return "";
+  const baseline = diagnostics.baselineGroundingDiagnostics || null;
+  const rows = [
+    ["검색 모델", diagnostics.model || ""],
+    ["검색 실행", diagnostics.searchTraceAvailable === false ? "검색 메타데이터 없음" : "검색 메타데이터 확인"],
+    ["출처 수", diagnostics.sourceCount !== undefined ? `${diagnostics.sourceCount}건` : ""],
+    ["제외 항목", diagnostics.droppedCount !== undefined ? `${diagnostics.droppedCount}건` : ""],
+    ["오류", diagnostics.errorMessage || ""],
+    baseline?.model ? ["보강 검색 모델", baseline.model] : null,
+    baseline?.sourceCount !== undefined ? ["보강 출처 수", `${baseline.sourceCount}건`] : null
+  ].filter((row) => row && row[1] !== "");
+  const queries = mergeTextLists([
+    ...asArray(diagnostics.webSearchQueries),
+    ...asArray(baseline?.webSearchQueries)
+  ]).slice(0, 12);
+  return `
+    <details class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+      <summary class="cursor-pointer font-extrabold text-slate-700">검색 진단 보기</summary>
+      ${rows.length ? `<dl class="mt-3 grid gap-2 sm:grid-cols-2">${rows.map(([label, value]) => `
+        <div>
+          <dt class="font-bold text-slate-500">${escapeHtml(label)}</dt>
+          <dd class="mt-0.5 text-slate-700">${escapeHtml(String(value))}</dd>
+        </div>`).join("")}</dl>` : ""}
+      ${queries.length ? `<div class="mt-3">
+        <div class="mb-1 font-bold text-slate-500">실행 검색어</div>
+        <div class="flex flex-wrap gap-1.5">${queries.map((query) => `<span class="rounded bg-white px-2 py-1 text-slate-600">${escapeHtml(query)}</span>`).join("")}</div>
+      </div>` : ""}
+    </details>`;
 }
 
 function renderQuestionsPreview(questions = []) {
