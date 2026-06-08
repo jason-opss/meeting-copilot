@@ -1332,7 +1332,7 @@ async function fetchMarketContext() {
   const searchFocus = buildMarketSearchFocus();
   const searchDate = new Date();
   const searchDateText = formatIsoDate(searchDate);
-  const recencyCutoffText = formatIsoDate(addMonths(searchDate, -6));
+  const recencyCutoffText = formatIsoDate(addMonths(searchDate, -12));
   const prompt = `
 기관 LP의 운용사 미팅 준비를 위해 최신 시장, 뉴스, 정책, 규제, 리스크 맥락을 조사해 JSON으로만 답하세요.
 사용자의 "딜 / 자산 메모"에는 자산 개요, 지역, 보증 구조, 과거 이슈, 우려사항, 잠정 판단이 섞여 있을 수 있습니다. 이 메모를 검색 키워드와 리스크 분석의 핵심 단서로 사용하세요.
@@ -1340,7 +1340,7 @@ async function fetchMarketContext() {
 입력값의 fundName은 펀드명뿐 아니라 직접대출명, PF 대출명, 단일 자산 거래명일 수 있습니다. 시장 맥락과 검색 키워드를 만들 때 펀드형 투자와 직접대출/단일 거래 가능성을 모두 열어두세요.
 
 검색 기준일: ${searchDateText}
-최신 뉴스/정책/시장자료 기준: ${recencyCutoffText} 이후 공개된 자료만 사용
+최신 뉴스/정책/시장자료 기준: 검색 기준일(${searchDateText}) 기준 최근 1년, 즉 ${recencyCutoffText} 이후 공개된 자료 사용
 
 검색/분석 방식:
 - 아래 "검색 초점"의 자산군별 체크리스트를 기본 검색 흐름으로 사용하고, IM/입력값에서 발견되는 특이사항을 추가 검색 단서로 사용하세요.
@@ -1357,7 +1357,7 @@ async function fetchMarketContext() {
 - directDealEvents/recentEvents에는 운용사/펀드/대출명/거래명/프로젝트명 또는 IM에서 확인된 특정 자산·사업지와 직접 연결되는 기사·공시·보도자료만 넣으세요.
 - 일반 시장 동향, 섹터 전망, 금리/환율/거래량/밸류에이션 자료는 keyMarketTrends 또는 riskSignals로 분류하세요. directDealEvents/recentEvents에 섞지 마세요.
 - recentEvents, policyRegulatoryNotes, keyMarketTrends, riskSignals, sources에는 반드시 날짜와 출처를 붙이세요.
-- 날짜가 없거나 ${recencyCutoffText} 이전 자료이면 최신 뉴스/정책/시장자료처럼 쓰지 말고 배열에서 제외하세요.
+- 날짜가 없거나 검색 기준일(${searchDateText}) 기준 최근 1년 범위(${recencyCutoffText} 이후) 밖의 자료이면 최신 뉴스/정책/시장자료처럼 쓰지 말고 배열에서 제외하세요.
 - "날짜 확인 필요", "출처 확인 필요", "최근 자료 확인 필요" 같은 문구를 출력하지 마세요. 근거가 없으면 해당 배열을 비우고 sourceQuality에 부족하다고 쓰세요.
 - 금리 상승, 인플레이션, 거래 위축, 밸류에이션 변화 같은 판단은 어느 시점의 어떤 출처에 근거한 것인지 date/source/fact로 명시하세요.
 - 검색 결과가 부족하면 부족하다고 표시하고, 추정으로 채우지 마세요.
@@ -1384,7 +1384,7 @@ JSON 스키마:
   "lpQuestions": ["최대 5개. 위 최신 근거에서 파생된 LP 질문"],
   "followUpRequests": ["최대 3개. 시장/정책 확인용 추가 요청자료"],
   "sources": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "출처 제목", "note": "이번 건과의 관련성"}],
-  "sourceQuality": "6개월 이내 날짜가 확인된 구체적 자료 충분/부족. 부족하면 어떤 축이 부족한지 설명"
+  "sourceQuality": "검색 기준일 기준 최근 1년 내 날짜가 확인된 구체적 자료 충분/부족. 부족하면 어떤 축이 부족한지 설명"
 }`;
   let detailedContext = null;
   let detailedError = null;
@@ -1415,7 +1415,7 @@ function buildBaselineMarketContextPrompt({ searchFocus, searchDateText, recency
 이 요청은 운용사/펀드 개별 뉴스 검색이 아니라, 선택된 지역·자산군·섹터의 거시 시장 맥락을 확보하기 위한 필수 검색입니다.
 
 검색 기준일: ${searchDateText}
-최신 시장자료 기준: ${recencyCutoffText} 이후 공개된 자료만 사용
+최신 시장자료 기준: 검색 기준일(${searchDateText}) 기준 최근 1년, 즉 ${recencyCutoffText} 이후 공개된 자료 사용
 
 반드시 수행할 검색:
 ${JSON.stringify(searchFocus.baselineMarketQueries || [], null, 2)}
@@ -1579,11 +1579,11 @@ function sanitizeGroundedMarketContext(context = {}, groundingMetadata = null) {
     sanitized.sourceQuality = "검색 그라운딩 메타데이터가 없어 최신 뉴스/시장 근거를 보고서에 반영하지 않음.";
   } else if (!hasAnyMarketEvidence(sanitized)) {
     sanitized.summary = "";
-    sanitized.sourceQuality = "검색은 실행되었으나 날짜·출처·제목 기준을 통과한 시장/뉴스 근거가 없어 보고서에 반영하지 않음.";
+    sanitized.sourceQuality = "검색은 실행되었으나 검색 기준일 기준 최근 1년 내 날짜·출처 기준을 통과한 시장/뉴스 근거가 부족해 보고서에 제한적으로 반영함.";
   } else if (dropped.length) {
     sanitized.sourceQuality = [
       sanitized.sourceQuality,
-      `검증 제외 ${dropped.length}건: 출처/날짜/검색근거가 부족한 항목 제거.`
+      `검증 제외 ${dropped.length}건: 출처/날짜/검색근거가 부족한 항목은 환각 방지를 위해 제외.`
     ].filter(Boolean).join(" ");
   }
   sanitized.groundingDiagnostics = {
@@ -1625,7 +1625,7 @@ function validateGroundedMarketItem(item, { groundingAvailable, groundedText, pr
     if (isLowReliabilityMarketSource(source, title)) {
       return { ok: false, reason: "출처 신뢰도 낮음" };
     }
-    if (!hasGroundingOverlap(source, title, groundedText)) {
+    if (!hasGroundingOverlap(source, title, groundedText, item)) {
       return { ok: false, reason: "검색 메타데이터와 출처/제목 불일치" };
     }
   }
@@ -1684,15 +1684,22 @@ function isLowReliabilityMarketSource(source, title = "") {
   return /youtube|youtu\.be|유튜브|tiktok|instagram|facebook|reddit|blog|블로그|카페|forum|커뮤니티|\bdaum\b|\bnaver\b|다음|네이버/i.test(text);
 }
 
-function hasGroundingOverlap(source, title, groundedText) {
+function hasGroundingOverlap(source, title, groundedText, item = null) {
   const grounded = normalizeProtectedEntityName(groundedText).toLowerCase();
   const sourceKey = normalizeProtectedEntityName(source).toLowerCase();
   if (sourceKey.length >= 2 && grounded.includes(sourceKey)) return true;
-  const titleTokens = String(title || "")
+  const sourceTokens = String(source || "")
+    .split(/[\s"'“”‘’()[\]{}<>.,;:|/\\·_-]+/)
+    .map(normalizeProtectedEntityName)
+    .filter((token) => token.length >= 3);
+  if (sourceTokens.some((token) => grounded.includes(token.toLowerCase()))) return true;
+  const itemText = formatListItemText(item || {});
+  const titleTokens = `${title || ""} ${itemText || ""}`
     .split(/[\s"'“”‘’()[\]{}<>.,;:|/\\·_-]+/)
     .map(normalizeProtectedEntityName)
     .filter((token) => token.length >= 4);
-  return titleTokens.some((token) => grounded.includes(token.toLowerCase()));
+  const matches = titleTokens.filter((token) => grounded.includes(token.toLowerCase()));
+  return matches.length >= 1;
 }
 
 function cleanMarketSummary(summary, protectedNames, groundedText) {
@@ -1713,7 +1720,7 @@ function hasReliableMarketDate(value) {
   const day = Number(match[3] || 1);
   const date = new Date(year, month - 1, day);
   if (Number.isNaN(date.getTime())) return false;
-  return date >= addMonths(new Date(), -6);
+  return date >= addMonths(new Date(), -12);
 }
 
 function normalizeProtectedEntityName(value) {
@@ -2916,7 +2923,7 @@ function isWeakMarketItem(item) {
 
 function renderMarketEvidenceList(items) {
   const filtered = asArray(items).filter((item) => item && !isWeakMarketItem(item));
-  if (!filtered.length) return `<p class="text-sm leading-6 text-slate-400">최근 6개월 내 날짜와 출처가 확인된 근거 없음</p>`;
+  if (!filtered.length) return `<p class="text-sm leading-6 text-slate-400">검색일 기준 최근 1년 내 날짜와 출처가 확인된 근거 없음</p>`;
   return `<div class="space-y-2">${filtered.map(renderMarketEvidenceItem).join("")}</div>`;
 }
 
