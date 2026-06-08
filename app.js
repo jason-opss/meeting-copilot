@@ -3,8 +3,21 @@ const LIBRARY_KEY = "meetingCopilot.library.v1";
 const PROFILE_KEY = "meetingCopilot.profile.v1";
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_MODEL = "gemini-3.1-flash-lite";
-const FALLBACK_MODEL = "gemini-3.5-flash";
-const SEARCH_GROUNDING_MODEL = "gemini-2.5-flash";
+const FALLBACK_MODEL = "gemini-2.5-flash-lite";
+const GENERATION_FALLBACK_MODEL_CANDIDATES = [
+  "gemini-2.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-flash-lite-latest",
+  "gemini-2.5-flash",
+  "gemini-3.5-flash",
+  "gemini-flash-latest"
+];
+const SEARCH_GROUNDING_MODEL = "gemini-2.5-flash-lite";
+const SEARCH_GROUNDING_MODEL_CANDIDATES = [
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-2.0-flash"
+];
 const LIMIT_MESSAGE = "API Key가 없거나 한도가 제한되었습니다.";
 const PDFJS_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs";
 const PDFJS_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs";
@@ -94,6 +107,7 @@ let selectedFile = null;
 let pdfjsLibPromise = null;
 let isBusy = false;
 let lastGeminiModelUsed = DEFAULT_MODEL;
+let lastSearchGroundingModelUsed = SEARCH_GROUNDING_MODEL;
 let lastGeminiDiagnostic = null;
 let libraryUpdateTimer = null;
 let localMeetingStorageEnabled = true;
@@ -590,7 +604,7 @@ function makeInitial(name) {
 function renderProviderStatus() {
   if (!$("providerStatus")) return;
   const base = runtimeConfig.apiKey
-    ? `Gemini API Key가 현재 탭 메모리에만 적용되어 있습니다. 현재 모델: ${runtimeConfig.model || DEFAULT_MODEL} / 검색 그라운딩: ${SEARCH_GROUNDING_MODEL} / 적용 키: ${keyFingerprint(runtimeConfig.apiKey)}`
+    ? `Gemini API Key가 현재 탭 메모리에만 적용되어 있습니다. 현재 모델: ${runtimeConfig.model || DEFAULT_MODEL} / 검색 그라운딩: ${lastSearchGroundingModelUsed || SEARCH_GROUNDING_MODEL} (2.5 flash-lite → 2.5 flash → 2.0 flash) / 적용 키: ${keyFingerprint(runtimeConfig.apiKey)}`
     : `Gemini API Key가 없습니다. AI 버튼을 실행하면 "${LIMIT_MESSAGE}" 메시지가 표시됩니다.`;
   const diagnostic = formatGeminiDiagnostic(lastGeminiDiagnostic);
   $("providerStatus").textContent = diagnostic ? `${base}\n${diagnostic}` : base;
@@ -1226,7 +1240,7 @@ function buildMarketContextFallback(error) {
     sources: [],
     sourceQuality: `검색 그라운딩이 일시 실패하여 최신 뉴스/시장 근거를 보고서에 반영하지 않음. 사유: ${message}`,
     groundingDiagnostics: {
-      model: SEARCH_GROUNDING_MODEL,
+      model: lastSearchGroundingModelUsed || SEARCH_GROUNDING_MODEL,
       sourceCount: 0,
       droppedCount: 0,
       failed: true,
@@ -1297,7 +1311,7 @@ function sanitizeGroundedMarketContext(context = {}, groundingMetadata = null) {
     ].filter(Boolean).join(" ");
   }
   sanitized.groundingDiagnostics = {
-    model: SEARCH_GROUNDING_MODEL,
+    model: lastSearchGroundingModelUsed || SEARCH_GROUNDING_MODEL,
     webSearchQueries,
     sourceCount: chunks.length,
     droppedCount: dropped.length,
@@ -1774,11 +1788,87 @@ async function callGeminiVision(files, prompt) {
 }
 
 async function callGeminiWithSearch(prompt) {
-  return callGeminiGenerate({
+  requireApiKey();
+  const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     tools: [{ google_search: {} }],
     generationConfig: {}
-  }, { model: SEARCH_GROUNDING_MODEL, response: "full", noFallback: true });
+  };
+  const candidates = buildSearchGroundingModelCandidates();
+  const failures = [];
+
+  for (const model of candidates) {
+    try {
+      const response = await callGeminiModel(model, body, { response: "full" });
+      if (hasUsableGroundingMetadata(response.groundingMetadata)) {
+        lastSearchGroundingModelUsed = model;
+        return response;
+      }
+      failures.push({
+        model,
+        reason: "no_grounding_metadata",
+        rawMessage: "The model returned a response without grounding chunks."
+      });
+    } catch (error) {
+      const info = getGeminiErrorInfoFromError(error);
+      failures.push({
+        model,
+        reason: info.reason || "unknown",
+        status: info.status || null,
+        statusText: info.statusText || "",
+        rawMessage: info.rawMessage || error?.message || ""
+      });
+      if (!shouldTryNextSearchGroundingModel(error)) throw error;
+    }
+  }
+
+  const info = buildSearchGroundingFailureInfo(failures);
+  throw createGeminiApiError(info.message, info);
+}
+
+function buildSearchGroundingModelCandidates() {
+  return [
+    SEARCH_GROUNDING_MODEL,
+    ...SEARCH_GROUNDING_MODEL_CANDIDATES
+  ]
+    .map(normalizeGeminiModelName)
+    .filter(Boolean)
+    .filter(isLikelySearchGroundingModel)
+    .filter((model, index, models) => models.indexOf(model) === index);
+}
+
+function isLikelySearchGroundingModel(model) {
+  const name = String(model || "").toLowerCase();
+  if (!name.startsWith("gemini-")) return false;
+  if (/image|tts|robotics|computer-use|customtools/.test(name)) return false;
+  return true;
+}
+
+function hasUsableGroundingMetadata(metadata) {
+  return asArray(metadata?.groundingChunks).length > 0;
+}
+
+function shouldTryNextSearchGroundingModel(error) {
+  const info = getGeminiErrorInfoFromError(error);
+  const raw = `${info.status || ""} ${info.statusText || ""} ${info.rawMessage || ""} ${info.message || ""}`;
+  if (["unavailable", "rate_limit", "model_not_found", "model_not_listed", "unsupported_action"].includes(info.reason)) return true;
+  return /503|UNAVAILABLE|429|RESOURCE_EXHAUSTED|404|NOT_FOUND|not found|not supported|unsupported|google_search|tool/i.test(raw);
+}
+
+function buildSearchGroundingFailureInfo(failures = []) {
+  const details = failures.map((failure) => {
+    const code = [failure.status, failure.statusText || failure.reason].filter(Boolean).join(" ");
+    const raw = String(failure.rawMessage || "").replace(/\s+/g, " ").trim();
+    return `${failure.model}${code ? ` (${code})` : ""}${raw ? `: ${raw.slice(0, 180)}` : ""}`;
+  }).join(" | ");
+  return {
+    model: failures.map((failure) => failure.model).filter(Boolean).join(", "),
+    status: null,
+    statusText: "SEARCH_GROUNDING_FAILED",
+    rawMessage: details,
+    reason: "search_grounding_failed",
+    message: `Search grounding failed on all candidate models. ${details}`
+  };
 }
 
 async function callGeminiGenerate(body, options = {}) {
@@ -1804,6 +1894,68 @@ async function callGeminiGenerate(body, options = {}) {
     }
     throw error;
   }
+}
+
+async function callGeminiGenerate(body, options = {}) {
+  requireApiKey();
+  const models = options.noFallback
+    ? [options.model || runtimeConfig.model || DEFAULT_MODEL]
+    : buildGenerationModelCandidates(options.model || runtimeConfig.model || DEFAULT_MODEL);
+  const failures = [];
+
+  for (const model of models) {
+    try {
+      return await callGeminiModel(model, body, options);
+    } catch (error) {
+      const info = getGeminiErrorInfoFromError(error);
+      failures.push(info);
+      if (options.noFallback || !shouldFallbackToFlashLite(model, error)) throw error;
+      logGeminiDiagnostic({
+        model,
+        status: info.status || null,
+        statusText: info.statusText || "",
+        reason: "fallback_for_this_request",
+        rawMessage: info.rawMessage || info.message || ""
+      });
+    }
+  }
+
+  const info = buildGenerationFailureInfo(failures);
+  throw createGeminiApiError(info.message, info);
+}
+
+function buildGenerationModelCandidates(model) {
+  return [
+    model,
+    ...GENERATION_FALLBACK_MODEL_CANDIDATES
+  ]
+    .map(normalizeGeminiModelName)
+    .filter(Boolean)
+    .filter(isLikelyTextGenerationModel)
+    .filter((item, index, items) => items.indexOf(item) === index);
+}
+
+function isLikelyTextGenerationModel(model) {
+  const name = String(model || "").toLowerCase();
+  if (!name.startsWith("gemini-")) return false;
+  if (/image|tts|robotics|computer-use|customtools/.test(name)) return false;
+  return true;
+}
+
+function buildGenerationFailureInfo(failures = []) {
+  const details = failures.map((info) => {
+    const code = [info.status, info.statusText || info.reason].filter(Boolean).join(" ");
+    const raw = String(info.rawMessage || info.message || "").replace(/\s+/g, " ").trim();
+    return `${info.model}${code ? ` (${code})` : ""}${raw ? `: ${raw.slice(0, 160)}` : ""}`;
+  }).join(" | ");
+  return {
+    model: failures.map((info) => info.model).filter(Boolean).join(", "),
+    status: null,
+    statusText: "GENERATION_FAILED",
+    rawMessage: details,
+    reason: "generation_failed",
+    message: `Gemini 텍스트 생성 후보가 모두 실패했습니다. ${details}`
+  };
 }
 
 async function callGeminiModel(model, body, options = {}) {
@@ -1964,11 +2116,41 @@ function parseGeminiJson(text) {
   try {
     return JSON.parse(stripped);
   } catch {
-    const start = stripped.indexOf("{");
-    const end = stripped.lastIndexOf("}");
-    if (start >= 0 && end > start) return JSON.parse(stripped.slice(start, end + 1));
+    const jsonObject = extractFirstJsonObject(stripped);
+    if (jsonObject) return JSON.parse(jsonObject);
     throw new Error(LIMIT_MESSAGE);
   }
+}
+
+function extractFirstJsonObject(text) {
+  const start = text.indexOf("{");
+  if (start < 0) return "";
+  let depth = 0;
+  let inString = false;
+  let escaping = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaping) {
+        escaping = false;
+      } else if (char === "\\") {
+        escaping = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+  return "";
 }
 
 function normalizeBrief(brief) {
