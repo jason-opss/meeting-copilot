@@ -1562,13 +1562,18 @@ function sanitizeGroundedMarketContext(context = {}, groundingMetadata = null) {
     ...asArray(context.directDealEvents),
     ...asArray(context.recentEvents)
   ], "직접 관련 뉴스", { directOnly: true });
+  const relatedPartySignals = sanitizeItems([
+    ...asArray(context.directDealEvents),
+    ...asArray(context.recentEvents),
+    ...asArray(context.riskSignals)
+  ], "관계자 리스크 신호", { relatedPartyOk: true });
   const sanitized = {
     summary: groundingAvailable ? cleanMarketSummary(context.summary, protectedNames, groundedText) : "",
     directDealEvents,
     keyMarketTrends: sanitizeItems(context.keyMarketTrends || context.trends, "시장 동향"),
     recentEvents: directDealEvents,
     policyRegulatoryNotes: sanitizeItems(context.policyRegulatoryNotes || context.newsPolicy, "정책/규제"),
-    riskSignals: sanitizeItems(context.riskSignals, "리스크 신호"),
+    riskSignals: mergeMarketItemLists(sanitizeItems(context.riskSignals, "리스크 신호"), relatedPartySignals).slice(0, 5),
     lpQuestions: asArray(context.lpQuestions).slice(0, 5),
     followUpRequests: asArray(context.followUpRequests).slice(0, 3),
     sources: sanitizeItems(context.sources, "sources"),
@@ -1580,11 +1585,8 @@ function sanitizeGroundedMarketContext(context = {}, groundingMetadata = null) {
   } else if (!hasAnyMarketEvidence(sanitized)) {
     sanitized.summary = "";
     sanitized.sourceQuality = "검색은 실행되었으나 검색 기준일 기준 최근 1년 내 날짜·출처 기준을 통과한 시장/뉴스 근거가 부족해 보고서에 제한적으로 반영함.";
-  } else if (dropped.length) {
-    sanitized.sourceQuality = [
-      sanitized.sourceQuality,
-      `검증 제외 ${dropped.length}건: 출처/날짜/검색근거가 부족한 항목은 환각 방지를 위해 제외.`
-    ].filter(Boolean).join(" ");
+  } else {
+    sanitized.sourceQuality = buildSourceQualitySummary(sanitized, dropped);
   }
   sanitized.groundingDiagnostics = {
     model: lastSearchGroundingModelUsed || SEARCH_GROUNDING_MODEL,
@@ -1594,6 +1596,30 @@ function sanitizeGroundedMarketContext(context = {}, groundingMetadata = null) {
     directEntityNames
   };
   return sanitized;
+}
+
+function buildSourceQualitySummary(context = {}, dropped = []) {
+  const counts = {
+    direct: asArray(context.directDealEvents).length,
+    market: asArray(context.keyMarketTrends).length,
+    policy: asArray(context.policyRegulatoryNotes).length,
+    risk: asArray(context.riskSignals).length,
+    sources: asArray(context.sources).length
+  };
+  const parts = [
+    counts.direct ? `직접 관련 뉴스 ${counts.direct}건` : "",
+    counts.market ? `시장 참고자료 ${counts.market}건` : "",
+    counts.policy ? `정책/규제 ${counts.policy}건` : "",
+    counts.risk ? `리스크 신호 ${counts.risk}건` : "",
+    counts.sources ? `출처 ${counts.sources}건` : ""
+  ].filter(Boolean);
+  const base = parts.length
+    ? `검색 기준일 기준 최근 1년 내 날짜와 출처가 확인된 자료를 ${parts.join(", ")} 반영했습니다.`
+    : "검색 기준일 기준 최근 1년 내 날짜와 출처가 확인된 자료가 제한적입니다.";
+  const droppedText = dropped.length
+    ? ` 검증 제외 ${dropped.length}건: 출처/날짜/검색근거가 부족한 항목은 환각 방지를 위해 제외했습니다.`
+    : "";
+  return `${base}${droppedText}`;
 }
 
 function hasAnyMarketEvidence(context = {}) {
@@ -1606,7 +1632,7 @@ function hasAnyMarketEvidence(context = {}) {
   ].some((items) => asArray(items).length > 0);
 }
 
-function validateGroundedMarketItem(item, { groundingAvailable, groundedText, protectedNames, directEntityNames = [], directOnly = false }) {
+function validateGroundedMarketItem(item, { groundingAvailable, groundedText, protectedNames, directEntityNames = [], directOnly = false, relatedPartyOk = false }) {
   if (!groundingAvailable) return { ok: false, reason: "grounding metadata 없음" };
   const text = formatListItemText(item);
   if (!text.trim()) return { ok: false, reason: "빈 항목" };
@@ -1638,7 +1664,21 @@ function validateGroundedMarketItem(item, { groundingAvailable, groundedText, pr
   if (directOnly && !hasDirectEntitySupport(text, groundedText, directEntityNames)) {
     return { ok: false, reason: "직접 관련 고유명사 근거 없음" };
   }
+  if (relatedPartyOk && !isRelatedPartyRiskSignal(text, groundedText, directEntityNames)) {
+    return { ok: false, reason: "관계자 리스크 신호 아님" };
+  }
   return { ok: true };
+}
+
+function isRelatedPartyRiskSignal(itemText, groundedText, directEntityNames = []) {
+  const text = normalizeProtectedEntityName(itemText).toLowerCase();
+  const grounded = normalizeProtectedEntityName(groundedText).toLowerCase();
+  const mentionsParty = directEntityNames.some((name) => {
+    const normalized = normalizeProtectedEntityName(name).toLowerCase();
+    return normalized.length >= 3 && text.includes(normalized) && grounded.includes(normalized);
+  });
+  if (!mentionsParty) return false;
+  return /경영권|매각|인수|지분|최대주주|주주|핵심인력|인력|조직|담당|이탈|소송|제재|신용|등급|부실|책임준공|시공|재무|유동성|트랙레코드|trackrecord|ownership|sale|acquisition|litigation|credit/i.test(itemText);
 }
 
 function extractDirectEntityNames() {
@@ -2479,6 +2519,7 @@ function buildQuestionSuitabilityPrompt(brief) {
 - IM과 입력값이 충돌해 보일 때도 "사용자 입력과 IM이 불일치"라고 묻지 말고, "제공 자료 기준으로 각 당사자의 역할, 법적 지위, 책임 범위, 계약상 관계를 확인해 달라"처럼 물으세요.
 - GP가 모를 LP 내부 판단 과정, UI 입력 출처, 모델 판단 근거를 묻는 질문은 금지입니다.
 - GP가 알 수 있는 항목은 사업주체/차주/주주/운용사/시공사/신탁사/대주단 관계, 계약 책임, 전력/인허가, 임대/테넌트, EPC, 담보/보증, DSCR/LTV, 상환/리파이낸싱, 트랙레코드, alignment입니다.
+- 운용사 경영권 매각, 주주 변경, 핵심인력 이탈/변동, 담당팀 변경, 시공사·신탁사·관계사 재무/소송/신용 이슈는 "GP가 확답하기 어렵다"는 이유로 삭제하지 마세요. 본 건 담당 조직, 의사결정 라인, 핵심인력 유지, 이해상충 관리, LP 보고 체계, 계약상 책임과 리스크 완화 조치에 대한 질문으로 재작성하세요.
 - 질문은 최소 5개, 최대 10개를 유지하세요. 중요 리스크가 있으면 삭제보다 재작성하세요.
 - 내부 사고 과정은 출력하지 마세요.
 
@@ -2511,11 +2552,45 @@ function normalizeGpQuestionReviewList(reviewedQuestions, originalQuestions = []
     .map(normalizeQuestionForDealType)
     .map(rewriteQuestionForGpAudience)
     .filter(isQuestionSuitableForGp));
+  const marketQuestions = buildMarketDerivedGpQuestions();
   const withFallback = cleaned.length >= 5
     ? cleaned
-    : mergeQuestionLists([...cleaned, ...asArray(originalQuestions).map(rewriteQuestionForGpAudience), ...buildFallbackDealQuestions()])
+    : mergeQuestionLists([...cleaned, ...marketQuestions, ...asArray(originalQuestions).map(rewriteQuestionForGpAudience), ...buildFallbackDealQuestions()])
       .filter(isQuestionSuitableForGp);
-  return withFallback.slice(0, 10);
+  return mergeQuestionLists([...marketQuestions, ...withFallback]).filter(isQuestionSuitableForGp).slice(0, 10);
+}
+
+function buildMarketDerivedGpQuestions() {
+  const marketText = JSON.stringify(state.marketContext || {});
+  const questions = [];
+  if (/경영권|매각|인수|지분|최대주주|주주\s*변경|ownership|sale|acquisition/i.test(marketText)) {
+    questions.push({
+      category: "Alignment",
+      importance: "High",
+      question: "운용사 또는 주요 관계자의 경영권 매각·주주 변경 이슈가 본 건 담당 조직, IC 의사결정 라인, 핵심인력 유지 조건, LP 커뮤니케이션 체계에 미치는 영향은 무엇이며, 변동 발생 시 어떤 통지·승인 절차가 적용됩니까?",
+      rationale: "운용 안정성, 핵심인력 유지, 의사결정 연속성 및 LP 보호 장치 확인 필요",
+      source: "시장/관계자 뉴스"
+    });
+  }
+  if (/핵심인력|인력|조직|담당팀|이탈|변동|key person|team/i.test(marketText)) {
+    questions.push({
+      category: "트랙레코드",
+      importance: "High",
+      question: "본 건을 담당하는 핵심 운용역과 실무팀 구성, 최근 12개월 내 인력 변동 여부, key person 또는 담당자 변경 시 LP에게 제공되는 보고·승인·보완 절차는 어떻게 정리되어 있습니까?",
+      rationale: "담당팀 안정성과 운용 연속성 확인 필요",
+      source: "시장/관계자 뉴스"
+    });
+  }
+  if (/시공사|건설|책임준공|재무|신용|등급|유동성|소송|제재|부실|construction|credit|litigation/i.test(marketText)) {
+    questions.push({
+      category: "리스크",
+      importance: "High",
+      question: "시공사, 신탁사, 스폰서 등 주요 관계자의 재무·신용·소송·책임준공 관련 이슈가 본 건의 공정, 담보가치, 보증 이행 및 대주단 권리에 미치는 영향과 보완 장치는 무엇입니까?",
+      rationale: "관계자 리스크가 PF 또는 단일 자산 거래의 실행력과 회수 가능성에 미치는 영향 확인 필요",
+      source: "시장/관계자 뉴스"
+    });
+  }
+  return questions;
 }
 
 function rewriteQuestionForGpAudience(item) {
