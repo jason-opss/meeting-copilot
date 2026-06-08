@@ -3,14 +3,14 @@ const LIBRARY_KEY = "meetingCopilot.library.v1";
 const PROFILE_KEY = "meetingCopilot.profile.v1";
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_MODEL = "gemini-3.1-flash-lite";
-const FALLBACK_MODEL = "gemini-2.5-flash-lite";
+const FALLBACK_MODEL = "gemini-3.5-flash";
 const GENERATION_FALLBACK_MODEL_CANDIDATES = [
-  "gemini-2.5-flash-lite",
   "gemini-3.1-flash-lite",
-  "gemini-flash-lite-latest",
-  "gemini-2.5-flash",
-  "gemini-3.5-flash",
-  "gemini-flash-latest"
+  "gemini-3.5-flash"
+];
+const TEXT_GENERATION_ALLOWED_MODELS = [
+  "gemini-3.1-flash-lite",
+  "gemini-3.5-flash"
 ];
 const SEARCH_GROUNDING_MODEL = "gemini-2.5-flash-lite";
 const SEARCH_GROUNDING_MODEL_CANDIDATES = [
@@ -380,7 +380,8 @@ function loadProfile() {
   } catch {
     profile = { name: "사용자", department: "부서 미설정", model: DEFAULT_MODEL, meetingStorageEnabled: true };
   }
-  runtimeConfig.model = profile.model || DEFAULT_MODEL;
+  runtimeConfig.model = normalizeTextGenerationModel(profile.model || DEFAULT_MODEL);
+  profile.model = runtimeConfig.model;
   localMeetingStorageEnabled = profile.meetingStorageEnabled !== false;
 }
 
@@ -388,7 +389,7 @@ function saveProfile() {
   const safeProfile = {
     name: profile.name || "사용자",
     department: profile.department || "부서 미설정",
-    model: profile.model || DEFAULT_MODEL,
+    model: normalizeTextGenerationModel(profile.model || DEFAULT_MODEL),
     meetingStorageEnabled: localMeetingStorageEnabled
   };
   localStorage.setItem(PROFILE_KEY, JSON.stringify(safeProfile));
@@ -436,7 +437,7 @@ function syncFieldsSilently() {
 function openSettings() {
   $("settingsName").value = profile.name || "";
   $("settingsDepartment").value = profile.department || "";
-  $("settingsModel").value = runtimeConfig.model || DEFAULT_MODEL;
+  $("settingsModel").value = normalizeTextGenerationModel(runtimeConfig.model || DEFAULT_MODEL);
   $("settingsApiKey").value = "";
   $("settingsApiKey").placeholder = runtimeConfig.apiKey ? "새 API Key를 붙여넣으면 현재 키가 교체됩니다" : "Gemini API Key를 붙여넣으세요";
   $("settingsStorageEnabled").checked = localMeetingStorageEnabled;
@@ -469,7 +470,7 @@ function saveSettings() {
 function applySettingsFromModal() {
   profile.name = $("settingsName").value.trim() || "사용자";
   profile.department = $("settingsDepartment").value.trim() || "부서 미설정";
-  profile.model = $("settingsModel").value.trim() || DEFAULT_MODEL;
+  profile.model = normalizeTextGenerationModel($("settingsModel").value.trim() || DEFAULT_MODEL);
   runtimeConfig.model = profile.model;
   localMeetingStorageEnabled = $("settingsStorageEnabled").checked;
   const nextKey = sanitizeGeminiApiKey($("settingsApiKey").value);
@@ -492,7 +493,7 @@ async function testSettingsConnection() {
     if (!runtimeConfig.apiKey) throw new Error("API Key가 아직 적용되지 않았습니다. 새 키를 붙여넣고 다시 테스트하세요.");
     button.disabled = true;
     button.textContent = "모델 확인 중...";
-    const diagnostic = await runGeminiConnectionDiagnostics(runtimeConfig.model || DEFAULT_MODEL);
+    const diagnostic = await runGeminiConnectionDiagnostics(normalizeTextGenerationModel(runtimeConfig.model || DEFAULT_MODEL));
     lastGeminiDiagnostic = diagnostic;
     toast(`연결 테스트 성공: ${diagnostic.model} / ${keyFingerprint(runtimeConfig.apiKey)}`);
   } catch (error) {
@@ -576,6 +577,11 @@ async function fetchGeminiModelList() {
 
 function normalizeGeminiModelName(name) {
   return String(name || "").replace(/^models\//, "").trim();
+}
+
+function normalizeTextGenerationModel(model) {
+  const normalized = normalizeGeminiModelName(model || DEFAULT_MODEL);
+  return TEXT_GENERATION_ALLOWED_MODELS.includes(normalized) ? normalized : DEFAULT_MODEL;
 }
 
 function renderAll() {
@@ -2218,7 +2224,7 @@ function buildSearchGroundingFailureInfo(failures = []) {
 async function callGeminiGenerate(body, options = {}) {
   requireApiKey();
   const models = options.noFallback
-    ? [options.model || runtimeConfig.model || DEFAULT_MODEL]
+    ? [normalizeTextGenerationModel(options.model || runtimeConfig.model || DEFAULT_MODEL)]
     : buildGenerationModelCandidates(options.model || runtimeConfig.model || DEFAULT_MODEL);
   const failures = [];
 
@@ -2228,7 +2234,7 @@ async function callGeminiGenerate(body, options = {}) {
     } catch (error) {
       const info = getGeminiErrorInfoFromError(error);
       failures.push(info);
-      if (options.noFallback || !shouldFallbackToFlashLite(model, error)) throw error;
+      if (options.noFallback || !shouldTryNextTextGenerationModel(model, error)) throw error;
       logGeminiDiagnostic({
         model,
         status: info.status || null,
@@ -2245,13 +2251,18 @@ async function callGeminiGenerate(body, options = {}) {
 
 function buildGenerationModelCandidates(model) {
   return [
-    model,
+    normalizeTextGenerationModel(model),
     ...GENERATION_FALLBACK_MODEL_CANDIDATES
   ]
     .map(normalizeGeminiModelName)
     .filter(Boolean)
     .filter(isLikelyTextGenerationModel)
+    .filter(isAllowedTextGenerationModel)
     .filter((item, index, items) => items.indexOf(item) === index);
+}
+
+function isAllowedTextGenerationModel(model) {
+  return TEXT_GENERATION_ALLOWED_MODELS.includes(normalizeGeminiModelName(model));
 }
 
 function isLikelyTextGenerationModel(model) {
@@ -2324,7 +2335,7 @@ function sanitizeGeminiRequestBodyForModel(body, model) {
   return next;
 }
 
-function shouldFallbackToFlashLite(model, error = "") {
+function shouldTryNextTextGenerationModel(model, error = "") {
   if (model === FALLBACK_MODEL) return false;
   const message = typeof error === "string" ? error : error?.message || "";
   const info = typeof error === "string" ? null : error?.gemini;
