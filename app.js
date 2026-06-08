@@ -472,7 +472,7 @@ function applySettingsFromModal() {
   profile.model = $("settingsModel").value.trim() || DEFAULT_MODEL;
   runtimeConfig.model = profile.model;
   localMeetingStorageEnabled = $("settingsStorageEnabled").checked;
-  const nextKey = $("settingsApiKey").value.trim();
+  const nextKey = sanitizeGeminiApiKey($("settingsApiKey").value);
   if (nextKey) {
     runtimeConfig.apiKey = nextKey;
     $("settingsApiKey").value = "";
@@ -556,9 +556,10 @@ async function runGeminiConnectionDiagnostics(model) {
 }
 
 async function fetchGeminiModelList() {
+  const apiKey = getGeminiApiKeyForRequest();
   const response = await fetch(`${GEMINI_API_BASE}?pageSize=1000`, {
     method: "GET",
-    headers: { "x-goog-api-key": runtimeConfig.apiKey }
+    headers: { "x-goog-api-key": apiKey }
   });
   if (!response.ok) {
     const errorText = await response.text().catch(() => "");
@@ -641,9 +642,27 @@ function renderStorageSettingsStatus() {
 
 function keyFingerprint(key) {
   if (!key) return "키 없음";
-  const trimmed = String(key).trim();
+  const trimmed = sanitizeGeminiApiKey(key);
   const tail = trimmed.slice(-4);
   return `•••• ${tail}`;
+}
+
+function sanitizeGeminiApiKey(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const compact = raw.replace(/[\s"'`<>]/g, "");
+  const matched = compact.match(/(?:AQ\.[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+)/);
+  return matched ? matched[0] : compact;
+}
+
+function getGeminiApiKeyForRequest() {
+  const key = sanitizeGeminiApiKey(runtimeConfig.apiKey);
+  if (!key) throw new Error(LIMIT_MESSAGE);
+  if (!/^[A-Za-z0-9_.-]+$/.test(key)) {
+    throw new Error("API Key에 키 이외의 문자가 섞여 있습니다. 키 값만 다시 붙여넣고 저장하세요.");
+  }
+  runtimeConfig.apiKey = key;
+  return key;
 }
 
 function renderFileState() {
@@ -819,7 +838,7 @@ function hydrateMeetingFieldsFromAnalysis() {
 }
 
 function requireApiKey() {
-  if (!runtimeConfig.apiKey) throw new Error(LIMIT_MESSAGE);
+  getGeminiApiKeyForRequest();
 }
 
 async function processSelectedIm() {
@@ -1110,6 +1129,7 @@ function buildMarketSearchQueries() {
   const im = state.imProcessingResult?.imAnalysis || {};
   const detected = im.autoDetectedFields || {};
   const checklist = getAssetClassMarketChecklist();
+  const specific = extractSpecificMarketSearchSignals();
   const parts = [
     meeting.managerName,
     meeting.fundName,
@@ -1133,14 +1153,45 @@ function buildMarketSearchQueries() {
     `${region} ${sector} ${strategy} 최근 뉴스 정책 규제`,
     `${cleaned} 리스크 금리 보증 상환 조건`,
     `${meeting.managerName || ""} ${meeting.fundName || ""} 운용사 거래 뉴스`,
+    ...specific.specificSearchQueries,
     ...checklist.prioritySearchQueries
-  ].map((query) => query.replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 8);
+  ].map((query) => query.replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 12);
+}
+
+function buildBaselineMarketSearchQueries() {
+  const meeting = deriveEffectiveMeetingInfo();
+  const im = state.imProcessingResult?.imAnalysis || {};
+  const detected = im.autoDetectedFields || {};
+  const region = localizeDisplayTerm(meeting.locationType) || detected.region || "주요 투자지역";
+  const assetClass = localizeDisplayTerm(meeting.assetClass) || detected.assetClass || "대체투자";
+  const strategy = localizeDisplayTerm(meeting.strategy) || detected.strategy || "";
+  const sector = localizeDisplayTerm(meeting.sector) || detected.sector || "";
+  const regionScope = region === "국내" ? "한국" : region === "해외" ? "북미 미국 글로벌" : region;
+  const queries = [
+    `${regionScope} ${assetClass} 시장 동향 금리 거래량 2026`,
+    `${regionScope} ${sector || assetClass} 시장 전망 리스크 정책 2026`,
+    `${regionScope} ${strategy || assetClass} 투자 시장 밸류에이션 유동성 2026`
+  ];
+  if (/부동산|Real Estate/i.test(assetClass)) {
+    queries.push(`${regionScope} 부동산 경기 동향 PF 대출 연체 공실률 거래량 2026`);
+  }
+  if (/사모투자\(PE\)|Private Equity|PE/i.test(assetClass)) {
+    queries.push(`${regionScope} private equity market fundraising exits valuation M&A IPO 2026`);
+  }
+  if (/사모투자\(PD\)|Private Debt|PD/i.test(assetClass)) {
+    queries.push(`${regionScope} private debt direct lending credit spread refinancing default 2026`);
+  }
+  if (/인프라|Infrastructure/i.test(assetClass)) {
+    queries.push(`${regionScope} infrastructure investment market financing regulation yield 2026`);
+  }
+  return mergeTextLists(queries.map((query) => query.replace(/\s+/g, " ").trim()).filter(Boolean)).slice(0, 6);
 }
 
 function buildMarketSearchFocus() {
   const meeting = deriveEffectiveMeetingInfo();
   const im = state.imProcessingResult?.imAnalysis || {};
   const checklist = getAssetClassMarketChecklist();
+  const specific = extractSpecificMarketSearchSignals();
   return {
     gpOrManager: meeting.managerName || "",
     fundLoanOrDealName: meeting.fundName || "",
@@ -1156,8 +1207,115 @@ function buildMarketSearchFocus() {
     imNumbersToVerify: asArray(im.keyNumbersToVerify).slice(0, 4).map(formatListItemText),
     imVerificationItems: asArray(im.verificationItems).slice(0, 4).map(formatListItemText),
     assetClassMarketChecklist: checklist.baselineChecklist,
+    baselineMarketQueries: buildBaselineMarketSearchQueries(),
+    specificSignals: specific.specificSignals,
+    specificSearchQueries: specific.specificSearchQueries,
     suggestedSearchQueries: buildMarketSearchQueries()
   };
+}
+
+function extractSpecificMarketSearchSignals() {
+  const corpus = buildMarketSearchCorpus();
+  const meeting = deriveEffectiveMeetingInfo();
+  const fundOrDealName = meeting.fundName || "";
+  const signals = [];
+  const addSignal = (type, value, queries) => {
+    const cleanValue = String(value || "").replace(/\s+/g, " ").trim();
+    if (!cleanValue) return;
+    signals.push({
+      type,
+      value: cleanValue,
+      searchPurpose: describeSpecificSearchPurpose(type),
+      queries: mergeTextLists(queries.map((query) => query.replace(/\s+/g, " ").trim()).filter(Boolean)).slice(0, 4)
+    });
+  };
+
+  extractRegexMatches(corpus, /(?:경기도|서울|인천|부산|대구|대전|광주|울산|세종|강원|충청|전라|경상|제주)?\s*[가-힣A-Za-z0-9]+(?:세교|신도시|지구|역세권|블록|BL|구역|산단|택지|도시개발)[가-힣A-Za-z0-9\s()_-]{0,18}(?:PF|프로젝트\s*파이낸싱|브릿지론|본PF)/gi)
+    .forEach((phrase) => {
+      const location = phrase.replace(/(?:PF|프로젝트\s*파이낸싱|브릿지론|본PF).*/i, "").trim() || phrase;
+      addSignal("domestic_project_pf", phrase, [
+        `${phrase} 뉴스 인허가 분양 사업지`,
+        `${location} 부동산 경기 미분양 공급 거래량`,
+        `${location} PF 대출 연체 리파이낸싱 시공사`,
+        `${fundOrDealName} ${phrase} 사업주체 시공사 신탁사`
+      ]);
+    });
+
+  extractRegexMatches(corpus, /\b(?:Dallas|Austin|Houston|New York|Los Angeles|Seattle|Atlanta|Phoenix|Chicago|Boston|San Francisco|San Jose|Miami|Washington(?:\s*DC)?|Toronto|London|Tokyo|Singapore|Sydney|Melbourne)\b[\w\s/-]{0,32}\b(?:multifamily|multi-family|office|logistics|industrial|data center|hotel|student housing|PF|construction loan|bridge loan)\b/gi)
+    .forEach((phrase) => addSignal("global_property_pf", phrase, [
+      `${phrase} market rent vacancy cap rate transaction`,
+      `${phrase} construction loan refinancing debt market`,
+      `${phrase} supply pipeline absorption occupancy`,
+      `${fundOrDealName} ${phrase} project sponsor news`
+    ]));
+
+  extractRegexMatches(corpus, /\b(?:Asia|Asian|North America|US|U\.S\.|Europe|Global|APAC|아시아|북미|미국|유럽)\b[\w\s/-]{0,36}(?:middle market|mid-market|미들마켓|buyout|growth|private equity|PE|사모투자)/gi)
+    .forEach((phrase) => addSignal("regional_pe_strategy", phrase, [
+      `${phrase} deal activity exits valuation fundraising`,
+      `${phrase} M&A IPO financing market`,
+      `${phrase} private equity dry powder portfolio exit`,
+      `${fundOrDealName} ${phrase} GP track record`
+    ]));
+
+  extractNamedPartiesForSearch(corpus).forEach((name) => addSignal("named_party", name, [
+    `${name} 최근 뉴스 보도자료 투자 거래`,
+    `${name} 소송 제재 신용등급 부실 리스크`,
+    `${name} ${fundOrDealName} 관련 뉴스`,
+    `${name} track record portfolio transaction`
+  ]));
+
+  const uniqueSignals = [];
+  const seen = new Set();
+  signals.forEach((signal) => {
+    const key = normalizeFactKey(`${signal.type} ${signal.value}`);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    uniqueSignals.push(signal);
+  });
+  return {
+    specificSignals: uniqueSignals.slice(0, 10),
+    specificSearchQueries: mergeTextLists(uniqueSignals.flatMap((signal) => signal.queries)).slice(0, 16)
+  };
+}
+
+function buildMarketSearchCorpus() {
+  const meeting = deriveEffectiveMeetingInfo();
+  const im = state.imProcessingResult?.imAnalysis || {};
+  return [
+    meeting.managerName,
+    meeting.fundName,
+    meeting.keyConcerns,
+    state.imProcessingResult?.textExcerpt,
+    JSON.stringify(im)
+  ].filter(Boolean).join("\n").replace(/\s+/g, " ").trim();
+}
+
+function extractRegexMatches(text, regex) {
+  return mergeTextLists((String(text || "").match(regex) || [])
+    .map((item) => item.replace(/\s+/g, " ").trim())
+    .filter((item) => item.length >= 3 && item.length <= 80));
+}
+
+function extractNamedPartiesForSearch(text) {
+  const knownParties = [
+    "KKR", "Carlyle", "칼라일", "BlackRock", "블랙락", "Ares", "Apollo", "Brookfield", "EQT", "TPG",
+    "이지스자산운용", "마스턴투자운용", "코람코", "미래에셋", "삼성SRA", "신한자산운용", "하나자산신탁",
+    "포스코이앤씨", "현대건설", "대우건설", "GS건설", "DL이앤씨", "HDC현대산업개발", "롯데건설"
+  ];
+  const foundKnown = knownParties.filter((name) => new RegExp(escapeRegExp(name), "i").test(text));
+  const companyMatches = extractRegexMatches(text, /[가-힣A-Za-z0-9&.\s-]{2,32}(?:자산운용|투자운용|이앤씨|건설|신탁|증권|캐피탈|파트너스|운용|리츠|REITs|Capital|Partners|Management|Asset Management|Construction)/gi);
+  return mergeTextLists([...foundKnown, ...companyMatches])
+    .map((item) => item.replace(/^(?:및|또는|그리고|with|and)\s+/i, "").trim())
+    .filter((item) => item.length >= 2 && item.length <= 50)
+    .slice(0, 10);
+}
+
+function describeSpecificSearchPurpose(type) {
+  if (type === "domestic_project_pf") return "국내 PF 사업지는 사업지 뉴스, 인허가·분양·미분양, 지역 부동산 경기, PF 대출/시공사/신탁사 이슈를 확인합니다.";
+  if (type === "global_property_pf") return "해외 부동산 PF는 도시별 임대료, 공실률, 캡레이트, 공급 파이프라인, 건설대출·리파이낸싱 환경을 확인합니다.";
+  if (type === "regional_pe_strategy") return "지역·전략형 PE는 거래량, Exit, 밸류에이션, 펀드레이징, 조달 환경을 확인합니다.";
+  if (type === "named_party") return "운용사·관계사명은 최근 뉴스, 보도자료, 소송·제재·신용 이슈, 트랙레코드와 거래 관련성을 확인합니다.";
+  return "IM에서 확인된 구체 신호를 별도 검색 축으로 확인합니다.";
 }
 
 function formatIsoDate(date) {
@@ -1186,6 +1344,11 @@ async function fetchMarketContext() {
 
 검색/분석 방식:
 - 아래 "검색 초점"의 자산군별 체크리스트를 기본 검색 흐름으로 사용하고, IM/입력값에서 발견되는 특이사항을 추가 검색 단서로 사용하세요.
+- 검색 초점의 specificSignals/specificSearchQueries는 IM에서 확인된 구체 사업지·도시·전략·운용사·관계사 신호입니다. 이 항목들은 기본 시장동향과 별도로 반드시 검색하세요.
+- 예: "경기도 오산세교 PF"는 오산세교 사업지 뉴스, 인허가, 분양/미분양, 지역 부동산 경기, PF 대출·시공사·신탁사 이슈를 확인합니다.
+- 예: "Dallas multifamily PF"는 Dallas multifamily 임대료, 공실률, 캡레이트, 공급 파이프라인, construction loan/refinancing 환경을 확인합니다.
+- 예: "Asia middle market PE"는 Asia middle-market PE의 거래량, Exit, 밸류에이션, 펀드레이징, 조달 환경을 확인합니다.
+- KKR, Carlyle, BlackRock, 이지스자산운용, 포스코이앤씨 같은 운용사·시공사·관계사명은 최근 뉴스, 공식 보도자료, 소송·제재·신용 이슈, 관련 거래/트랙레코드를 별도 확인하세요.
 - 구체적인 지역, 섹터, 전략, 보증, 금리, 상환, 공사/인허가, 정책 키워드 중심으로 찾으세요.
 - 일반적인 자산군 설명은 1문장 이하로 줄이고, 이번 건과 직접 연결되는 시장/뉴스/정책/리스크만 남기세요.
 - 운용사명, 펀드명, 대출명, 거래명에 대한 개별 뉴스는 검색 결과에서 실제 기사/공시/보도자료가 확인된 경우에만 작성하세요.
@@ -1223,13 +1386,109 @@ JSON 스키마:
   "sources": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "출처 제목", "note": "이번 건과의 관련성"}],
   "sourceQuality": "6개월 이내 날짜가 확인된 구체적 자료 충분/부족. 부족하면 어떤 축이 부족한지 설명"
 }`;
-  const response = await callGeminiWithSearch(prompt);
-  const parsed = parseGeminiJson(response.text);
-  return sanitizeGroundedMarketContext(parsed, response.groundingMetadata);
+  let detailedContext = null;
+  let detailedError = null;
+  try {
+    const response = await callGeminiWithSearch(prompt);
+    const parsed = parseGeminiJson(response.text);
+    detailedContext = sanitizeGroundedMarketContext(parsed, response.groundingMetadata);
+    if (hasAnyMarketEvidence(detailedContext)) return detailedContext;
+  } catch (error) {
+    detailedError = error;
+  }
+
+  const baselinePrompt = buildBaselineMarketContextPrompt({
+    searchFocus,
+    searchDateText,
+    recencyCutoffText,
+    priorFailure: detailedError?.message || detailedContext?.sourceQuality || ""
+  });
+  const baselineResponse = await callGeminiWithSearch(baselinePrompt);
+  const baselineParsed = parseGeminiJson(baselineResponse.text);
+  const baselineContext = sanitizeGroundedMarketContext(baselineParsed, baselineResponse.groundingMetadata);
+  return mergeMarketContexts(detailedContext, baselineContext);
+}
+
+function buildBaselineMarketContextPrompt({ searchFocus, searchDateText, recencyCutoffText, priorFailure }) {
+  return `
+기관 LP의 운용사 미팅 준비를 위해 기본 시장동향을 반드시 검색해 JSON으로만 답하세요.
+이 요청은 운용사/펀드 개별 뉴스 검색이 아니라, 선택된 지역·자산군·섹터의 거시 시장 맥락을 확보하기 위한 필수 검색입니다.
+
+검색 기준일: ${searchDateText}
+최신 시장자료 기준: ${recencyCutoffText} 이후 공개된 자료만 사용
+
+반드시 수행할 검색:
+${JSON.stringify(searchFocus.baselineMarketQueries || [], null, 2)}
+
+검색/작성 원칙:
+- Google Search grounding 도구를 반드시 실행하세요.
+- 내부 지식만으로 답하지 말고, 검색 결과에 출처 메타데이터가 붙는 공개 자료만 사용하세요.
+- 국내 부동산이면 국내 부동산 경기, PF/대출, 거래량, 공실/임대, 금리 영향을 다룹니다.
+- 해외/사모투자이면 북미 또는 주요 글로벌 private equity 시장의 fundraising, deal activity, exits, valuation, financing 동향을 다룹니다.
+- 직접 관련 뉴스가 없어도 keyMarketTrends, policyRegulatoryNotes, riskSignals에는 지역·자산군 기준의 기본 시장동향을 채우세요.
+- specificSignals가 있으면 해당 사업지·도시·전략·관계자명을 기본 시장동향과 연결해 Q&A에 쓸 수 있는 시사점으로 정리하세요.
+- 날짜/source/title 중 하나라도 불확실한 항목은 쓰지 마세요.
+- 근거 없는 기사 제목이나 수치를 만들지 마세요.
+- 각 배열은 최대 4개로 짧게 작성하세요.
+${priorFailure ? `\n직전 상세 검색 상태: ${priorFailure}` : ""}
+
+검색 초점:
+${JSON.stringify(searchFocus, null, 2)}
+
+JSON 스키마:
+{
+  "summary": "날짜와 출처가 확인된 기본 시장동향 3문장 이내",
+  "directDealEvents": [],
+  "keyMarketTrends": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "자료/기사명", "fact": "지역·자산군 기준으로 확인된 시장 동향", "relevance": "이번 건의 Q&A에 주는 시사점"}],
+  "recentEvents": [],
+  "policyRegulatoryNotes": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "정책/규제/시장자료명", "fact": "확인된 정책/규제/시장 환경", "relevance": "이번 건과의 관련성"}],
+  "riskSignals": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "근거 자료명", "fact": "Q&A에 반영해야 할 시장 리스크 신호", "relevance": "LP 확인 포인트"}],
+  "lpQuestions": ["기본 시장동향에서 파생되는 GP 질의 최대 5개"],
+  "followUpRequests": ["시장/정책 확인용 추가 요청자료 최대 3개"],
+  "sources": [{"date": "YYYY-MM-DD 또는 YYYY-MM", "source": "출처명", "title": "출처 제목", "note": "이번 건과의 관련성"}],
+  "sourceQuality": "기본 시장동향 검색 근거 충분/부족"
+}`;
+}
+
+function mergeMarketContexts(primary = null, fallback = null) {
+  if (!primary) return fallback || {};
+  if (!fallback || !hasAnyMarketEvidence(fallback)) return primary;
+  const merged = {
+    ...primary,
+    summary: primary.summary || fallback.summary || "",
+    directDealEvents: mergeMarketItemLists(primary.directDealEvents, fallback.directDealEvents).slice(0, 5),
+    keyMarketTrends: mergeMarketItemLists(primary.keyMarketTrends, fallback.keyMarketTrends).slice(0, 5),
+    recentEvents: mergeMarketItemLists(primary.recentEvents, fallback.recentEvents).slice(0, 5),
+    policyRegulatoryNotes: mergeMarketItemLists(primary.policyRegulatoryNotes, fallback.policyRegulatoryNotes).slice(0, 5),
+    riskSignals: mergeMarketItemLists(primary.riskSignals, fallback.riskSignals).slice(0, 5),
+    lpQuestions: mergeTextLists([...asArray(primary.lpQuestions), ...asArray(fallback.lpQuestions)]).slice(0, 5),
+    followUpRequests: mergeTextLists([...asArray(primary.followUpRequests), ...asArray(fallback.followUpRequests)]).slice(0, 3),
+    sources: mergeMarketItemLists(primary.sources, fallback.sources).slice(0, 8),
+    sourceQuality: [primary.sourceQuality, "기본 지역·자산군 시장동향 검색으로 보강됨.", fallback.sourceQuality].filter(Boolean).join(" ")
+  };
+  merged.groundingDiagnostics = {
+    ...(primary.groundingDiagnostics || {}),
+    baselineGroundingDiagnostics: fallback.groundingDiagnostics || null
+  };
+  return merged;
+}
+
+function mergeMarketItemLists(...lists) {
+  const seen = new Set();
+  const merged = [];
+  lists.flatMap((list) => asArray(list)).forEach((item) => {
+    const key = typeof item === "string"
+      ? normalizeFactKey(item)
+      : normalizeFactKey([item.date, item.source, item.title, item.fact].filter(Boolean).join(" "));
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    merged.push(item);
+  });
+  return merged;
 }
 
 function buildMarketContextFallback(error) {
-  const message = error?.message || "검색 그라운딩 호출 실패";
+  const message = formatMarketGroundingFailureMessage(error);
   return {
     summary: "",
     directDealEvents: [],
@@ -1240,15 +1499,30 @@ function buildMarketContextFallback(error) {
     lpQuestions: [],
     followUpRequests: [],
     sources: [],
-    sourceQuality: `검색 그라운딩이 일시 실패하여 최신 뉴스/시장 근거를 보고서에 반영하지 않음. 사유: ${message}`,
+    sourceQuality: message,
     groundingDiagnostics: {
       model: lastSearchGroundingModelUsed || SEARCH_GROUNDING_MODEL,
       sourceCount: 0,
       droppedCount: 0,
       failed: true,
-      errorMessage: message
+      errorMessage: error?.message || message,
+      rawMessage: error?.gemini?.rawMessage || ""
     }
   };
+}
+
+function formatMarketGroundingFailureMessage(error) {
+  const raw = `${error?.message || ""} ${error?.gemini?.rawMessage || ""}`;
+  if (/no_grounding_metadata|without grounding chunks|grounding metadata|출처 메타데이터/i.test(raw)) {
+    return "검색 그라운딩을 요청했지만 모델 응답에 출처 메타데이터가 붙지 않아 최신 뉴스/시장 근거를 반영하지 않았습니다. 앱은 같은 2.5 모델에서 검색 강제 재시도 후 후순위 모델로 넘어갑니다.";
+  }
+  if (/429|RESOURCE_EXHAUSTED|quota/i.test(raw)) {
+    return "검색 그라운딩 호출이 API 한도 문제로 실패해 최신 뉴스/시장 근거를 반영하지 않았습니다.";
+  }
+  if (/401|403|UNAUTHENTICATED|PERMISSION_DENIED|API Key/i.test(raw)) {
+    return "API Key 권한 문제로 검색 그라운딩이 실패해 최신 뉴스/시장 근거를 반영하지 않았습니다.";
+  }
+  return "검색 그라운딩이 일시 실패하여 최신 뉴스/시장 근거를 보고서에 반영하지 않았습니다.";
 }
 
 function sanitizeGroundedMarketContext(context = {}, groundingMetadata = null) {
@@ -1791,17 +2065,20 @@ async function callGeminiVision(files, prompt) {
 
 async function callGeminiWithSearch(prompt) {
   requireApiKey();
-  const body = {
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    tools: [{ google_search: {} }],
-    generationConfig: {}
-  };
   const candidates = buildSearchGroundingModelCandidates();
   const failures = [];
 
   for (const model of candidates) {
     try {
-      const response = await callGeminiModel(model, body, { response: "full" });
+      let response = await callGeminiModel(model, buildGeminiSearchRequestBody(prompt), { response: "full" });
+      if (!hasUsableGroundingMetadata(response.groundingMetadata)) {
+        failures.push({
+          model,
+          reason: "no_grounding_metadata",
+          rawMessage: "The first search-grounding response did not include grounding chunks. Retrying with an explicit search instruction."
+        });
+        response = await callGeminiModel(model, buildGeminiSearchRequestBody(buildGroundingRequiredPrompt(prompt)), { response: "full" });
+      }
       if (hasUsableGroundingMetadata(response.groundingMetadata)) {
         lastSearchGroundingModelUsed = model;
         return response;
@@ -1826,6 +2103,24 @@ async function callGeminiWithSearch(prompt) {
 
   const info = buildSearchGroundingFailureInfo(failures);
   throw createGeminiApiError(info.message, info);
+}
+
+function buildGeminiSearchRequestBody(prompt) {
+  return {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    tools: [{ google_search: {} }]
+  };
+}
+
+function buildGroundingRequiredPrompt(prompt) {
+  return `
+반드시 Google Search grounding 도구를 실행한 뒤 답하세요.
+- 내부 지식이나 추정만으로 답하지 마세요.
+- 최근 뉴스/시장/정책/리스크 자료를 공개 웹에서 검색하고, 검색으로 확인된 출처가 있는 항목만 JSON에 넣으세요.
+- 검색 결과가 부족하면 배열을 비우되, 응답 자체는 grounding metadata가 붙도록 검색 쿼리를 실행하세요.
+- 검색에 사용할 우선 쿼리는 아래 요청의 suggestedSearchQueries, 지역, 섹터, 운용사명, 펀드명, 대출명, 프로젝트명입니다.
+
+${prompt}`;
 }
 
 function buildSearchGroundingModelCandidates() {
@@ -1869,7 +2164,7 @@ function buildSearchGroundingFailureInfo(failures = []) {
     statusText: "SEARCH_GROUNDING_FAILED",
     rawMessage: details,
     reason: "search_grounding_failed",
-    message: `Search grounding failed on all candidate models. ${details}`
+    message: "검색 그라운딩을 실행했지만 출처 메타데이터를 확보하지 못했습니다. 2.5 모델은 검색 강제 재시도까지 수행했고, 후순위 모델도 실패했습니다."
   };
 }
 
@@ -1939,12 +2234,13 @@ async function callGeminiModel(model, body, options = {}) {
   lastGeminiModelUsed = model;
   const url = `${GEMINI_API_BASE}/${encodeURIComponent(model)}:generateContent`;
   try {
+    const apiKey = getGeminiApiKeyForRequest();
     const requestBody = sanitizeGeminiRequestBodyForModel(body, model);
     const response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-goog-api-key": runtimeConfig.apiKey
+        "x-goog-api-key": apiKey
       },
       body: JSON.stringify(requestBody)
     });
@@ -2018,6 +2314,13 @@ function getGeminiErrorInfo(errorText, status, model) {
       ...base,
       reason: "rate_limit",
       message: `${model} 모델의 프로젝트 한도 또는 분당 한도에 걸렸습니다. 잠시 후 다시 시도하거나 다른 프로젝트/API Key 또는 Flash Lite를 사용하세요.`
+    };
+  }
+  if (/bound service account is deleted or disabled|service account .*deleted|service account .*disabled/i.test(`${status} ${statusText} ${rawMessage}`)) {
+    return {
+      ...base,
+      reason: "service_account_disabled",
+      message: "이 API Key에 연결된 서비스 계정이 삭제되었거나 비활성화되어 Google API가 401로 거절했습니다. 같은 프로젝트에서 서비스 계정을 활성화하거나 새 Gemini API Key를 발급해 적용하세요."
     };
   }
   if (/API key not valid|permission|PERMISSION_DENIED|unauth|403|401/i.test(`${status} ${statusText} ${rawMessage}`)) {
