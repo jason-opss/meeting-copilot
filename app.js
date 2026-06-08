@@ -68,6 +68,7 @@ const emptyState = () => ({
     strategy: "",
     sector: "",
     capitalType: "",
+    dealType: "",
     investmentStructure: "",
     keyConcerns: ""
   },
@@ -168,6 +169,7 @@ function bindEvents() {
     "strategy",
     "sector",
     "capitalType",
+    "dealType",
     "investmentStructure",
     "keyConcerns",
     "headerManagerName",
@@ -320,6 +322,7 @@ function syncFieldsToState() {
     strategy: $("strategy").value,
     sector: $("sector").value,
     capitalType: $("capitalType").value,
+    dealType: $("dealType").value,
     investmentStructure: $("investmentStructure").value,
     keyConcerns: $("keyConcerns").value.trim()
   };
@@ -348,6 +351,7 @@ function applyStateToFields() {
     populateCapitalStructureSelect(state.meeting.investmentStructure || "");
     $("investmentStructure").value = state.meeting.investmentStructure || "";
   }
+  $("dealType").value = state.meeting.dealType || "";
   $("keyConcerns").value = state.meeting.keyConcerns || "";
   $("pageReadMode").value = "auto";
   $("customPages").value = "";
@@ -405,6 +409,7 @@ function syncFieldsSilently() {
   state.meeting.strategy = $("strategy").value;
   state.meeting.sector = $("sector").value;
   state.meeting.capitalType = $("capitalType").value;
+  state.meeting.dealType = $("dealType").value;
   state.meeting.investmentStructure = $("investmentStructure").value;
   state.meeting.keyConcerns = $("keyConcerns").value.trim();
   state.documentSettings.pageReadMode = "auto";
@@ -722,7 +727,13 @@ async function generateBrief() {
     }
 
     updateLoader("시장 맥락을 검색하는 중입니다.", "Gemini Google Search grounding으로 최근 시장, 뉴스, 정책 자료를 확인합니다.");
-    state.marketContext = await fetchMarketContext();
+    try {
+      state.marketContext = await fetchMarketContext();
+    } catch (marketError) {
+      console.warn("Market grounding failed; continuing without external market context.", marketError);
+      state.marketContext = buildMarketContextFallback(marketError);
+      toast("시장검색이 일시 실패해 IM/세팅값 기반으로 브리프를 계속 생성합니다.");
+    }
 
     updateLoader("질문과 리스크를 정리하는 중입니다.", "LP 미팅 관점의 예상 Q&A, Red Flag, 후속 요청자료를 구성합니다.");
     const prompt = buildBriefPrompt();
@@ -775,6 +786,7 @@ function hydrateMeetingFieldsFromAnalysis() {
     "strategy",
     "sector",
     "capitalType",
+    "dealType",
     "investmentStructure"
   ];
   let changed = false;
@@ -1200,6 +1212,29 @@ JSON 스키마:
   return sanitizeGroundedMarketContext(parsed, response.groundingMetadata);
 }
 
+function buildMarketContextFallback(error) {
+  const message = error?.message || "검색 그라운딩 호출 실패";
+  return {
+    summary: "",
+    directDealEvents: [],
+    keyMarketTrends: [],
+    recentEvents: [],
+    policyRegulatoryNotes: [],
+    riskSignals: [],
+    lpQuestions: [],
+    followUpRequests: [],
+    sources: [],
+    sourceQuality: `검색 그라운딩이 일시 실패하여 최신 뉴스/시장 근거를 보고서에 반영하지 않음. 사유: ${message}`,
+    groundingDiagnostics: {
+      model: SEARCH_GROUNDING_MODEL,
+      sourceCount: 0,
+      droppedCount: 0,
+      failed: true,
+      errorMessage: message
+    }
+  };
+}
+
 function sanitizeGroundedMarketContext(context = {}, groundingMetadata = null) {
   const chunks = asArray(groundingMetadata?.groundingChunks)
     .map((chunk) => chunk.web || chunk)
@@ -1300,7 +1335,7 @@ function validateGroundedMarketItem(item, { groundingAvailable, groundedText, pr
     if (isLowReliabilityMarketSource(source, title)) {
       return { ok: false, reason: "출처 신뢰도 낮음" };
     }
-    if (directOnly && !hasGroundingOverlap(source, title, groundedText)) {
+    if (!hasGroundingOverlap(source, title, groundedText)) {
       return { ok: false, reason: "검색 메타데이터와 출처/제목 불일치" };
     }
   }
@@ -1356,7 +1391,7 @@ function hasDirectEntitySupport(itemText, groundedText, directEntityNames) {
 
 function isLowReliabilityMarketSource(source, title = "") {
   const text = `${source} ${title}`;
-  return /youtube|youtu\.be|유튜브|tiktok|instagram|facebook|reddit|blog|블로그|카페|forum|커뮤니티/i.test(text);
+  return /youtube|youtu\.be|유튜브|tiktok|instagram|facebook|reddit|blog|블로그|카페|forum|커뮤니티|\bdaum\b|\bnaver\b|다음|네이버/i.test(text);
 }
 
 function hasGroundingOverlap(source, title, groundedText) {
@@ -1418,6 +1453,9 @@ function buildBriefPrompt() {
 - Q&A는 최소 5개, 최대 10개로 작성합니다.
 - Q&A의 중심은 딜 판단입니다. 투자 thesis, 구조, 상환/Exit, 담보/보증, 현금흐름, track record, alignment, 주요 리스크와 mitigation을 우선 질문하세요.
 - IM 내부 숫자/문구 오류 확인 질문은 보조 질문입니다. 같은 항목의 숫자, 금리, 수익률, LTV, DSCR, 기간, 금액, 약정 조건이 서로 다르게 적혀 있는 경우에만 expectedQaList에 포함하고, 전체 Q&A 중 최대 2개까지만 포함하세요.
+- 운용사명, 사업주체, 주주, 신탁사, 시공사처럼 역할이 여러 개인 당사자가 섞여 있을 때는 "확인됩니다", "불일치합니다"처럼 단정하지 말고 "역할 및 법적 지위 확인 필요", "사용자 입력 운용사와 IM상 주요 관계자의 역할 구분 필요"처럼 질문형으로 낮춰 쓰세요.
+- 시장검색 또는 IM에서 직접 확인되지 않은 운용사/주관사/거래당사자 관계를 새로 만들어 단정하지 마세요.
+- Alignment/IM 정합성 질문은 딜 판단에 중요한 경우에만 넣고, 전체 Q&A 중 1개를 넘기지 마세요.
 - 예: 주택도시기금 금리가 한 곳에는 2.8%, 다른 곳에는 2.6%로 보이면 "적용 기준일, 적용 구간, 산식 또는 오기 여부"를 묻는 Q&A를 만드세요.
 - 정보가 부족하면 지어내지 말고 "확인 필요"로 표시합니다.
 - 질문은 실제 미팅에서 바로 읽을 수 있는 수준으로 구체적으로 작성합니다.
@@ -1484,6 +1522,7 @@ function buildImAnalysisPrompt(text, policy, fileMeta) {
 아래 IM 텍스트를 읽고 JSON으로만 요약하세요.
 한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.
 IM이 펀드형 투자자료인지, 직접대출/프로젝트 파이낸싱/단일 자산 거래자료인지 먼저 구분하세요. 직접대출 또는 단일 트랜치 대출이면 fundName에는 대출명 또는 거래명을 넣고, 질문은 펀드 운용전략보다 차주, 담보, 보증, 상환재원, 선순위성, 약정 조건 중심으로 정리하세요.
+검토 유형은 fund 또는 loan 중 하나로 판단하세요. PF 대출, 담보대출, 직접대출, 대출확약, 차주/대주 구조이면 loan입니다. 블라인드펀드, 프로젝트펀드 출자, LP commitment 중심이면 fund입니다.
 
 분석 모드: ${policy.mode}
 파일 정보: ${JSON.stringify(fileMeta)}
@@ -1526,6 +1565,7 @@ ${text}
     "strategy": "",
     "sector": "",
     "capitalType": "",
+    "dealType": "fund 또는 loan",
     "investmentStructure": ""
   },
   "conflicts": [],
@@ -1539,6 +1579,7 @@ function buildImVisionPrompt(policy, fileMeta) {
 첨부 이미지를 보고 JSON으로만 답하세요.
 한국어를 기본 언어로 사용하세요. 운용사명, 펀드명, 대출명, 거래명, 계약명, 약어 등 원문 유지가 필요한 고유명사를 제외하고 설명문, 질문, 답변 요지, 리스크, Follow-up은 반드시 한국어로 작성하세요. 입력이 영어여도 보고서 문장과 표 내용은 한국어로 번역·요약하세요.
 IM이 펀드형 투자자료인지, 직접대출/프로젝트 파이낸싱/단일 자산 거래자료인지 먼저 구분하세요. 직접대출 또는 단일 트랜치 대출이면 fundName에는 대출명 또는 거래명을 넣고, 질문은 펀드 운용전략보다 차주, 담보, 보증, 상환재원, 선순위성, 약정 조건 중심으로 정리하세요.
+검토 유형은 fund 또는 loan 중 하나로 판단하세요. PF 대출, 담보대출, 직접대출, 대출확약, 차주/대주 구조이면 loan입니다. 블라인드펀드, 프로젝트펀드 출자, LP commitment 중심이면 fund입니다.
 
 분석 모드: ${policy.mode}
 파일 정보: ${JSON.stringify(fileMeta)}
@@ -1606,7 +1647,16 @@ async function generateReport() {
 
 function buildReportPrompt() {
   const tone = getReportToneConfig(state.reportTone);
+  const effectiveMeeting = deriveEffectiveMeetingInfo();
+  const reviewType = resolveReviewType(effectiveMeeting, {}, state.imProcessingResult?.imAnalysis || {});
+  const metricLabels = buildOverviewMetricRows({}, reviewType).map(([label]) => label);
   return `
+[중요 작성 지시]
+- 01 요약의 "심사역 의견"과 03 심사역 검토 의견의 "검토 의견 요약"은 반드시 이 딜이 무엇인지부터 알 수 있어야 합니다.
+- reviewConclusion에는 딜명/대출명/펀드명, 운용사, 지역·자산군·전략·구조 중 확인 가능한 정보를 넣어 "본 건은 어떤 성격의 검토 건인지"를 먼저 설명한 뒤, 추가 검토/보류/드랍/조건부 진행 판단을 이어서 작성하세요.
+- 03 심사역 검토 의견의 각 값에는 "결론:", "투자매력:", "핵심리스크:", "추가확인사항:" 같은 라벨을 쓰지 말고 본문 문장만 작성하세요.
+- 정보가 일부 부족해도 "확인 필요"만 쓰지 말고, 확인된 딜 정체성 + 부족한 확인사항을 함께 적으세요.
+
 당신은 기관 LP의 운용사 미팅 후속 정리를 돕는 AI 코파일럿입니다.
 사전 분석, 질문별 답변, 내부 메모, 자유 메모, Transcript를 종합해 JSON으로만 답하세요.
 확인되지 않은 내용은 단정하지 말고 "확인 필요"로 표시하세요.
@@ -1620,7 +1670,11 @@ fundName은 펀드명뿐 아니라 직접대출명, PF 대출명, 단일 자산 
 - 최종 DOCX는 DOCX_FINAL_WANTED.docx 양식에 들어갑니다. 아래 6개 섹션에 맞는 내용만 생성하세요.
   01 요약: 펀드명/대출명/거래명, 운용사, 미팅일자, 검토 결과, 심사역 의견에 들어갈 핵심 문장
   02 미팅 개요: 미팅 정보와 지역/자산군/전략/구조를 간결히 정리
-  03 심사역 검토 의견: 최대 5개 bullet, 각 bullet은 1~2문장
+  03 심사역 검토 의견: 반드시 아래 4개 bullet을 이 순서로 작성
+    1. 결론: 추가 검토 / 보류 / 드랍 / 조건부 진행 중 하나가 바로 보이도록 작성
+    2. 투자 매력 / Why This Deal: IRR, 담보, 입지, GP 역량, 구조적 보호장치, 시장 타이밍 등 중 핵심만 작성
+    3. 핵심 리스크 / Key Risks: 딜을 깨뜨릴 수 있는 가장 중요한 위험 2~3개만 작성
+    4. 추가 확인사항 / Next DD Items: 미팅 후 바로 받아야 할 자료와 확인 액션 작성
   04 핵심 DDQ: 최대 5개 질문과 GP 답변 요지
   05 주요 예상 리스크: 최대 6개 리스크, 구분/내용/심각도/당사 View로 나뉘어 들어갈 수 있게 작성
   06 향후 Follow-up: 1~3개 핵심 후속 확인사항만 작성. 항목 내용만 쓰고 담당/기한/상태는 생성하지 마세요.
@@ -1629,12 +1683,25 @@ fundName은 펀드명뿐 아니라 직접대출명, PF 대출명, 단일 자산 
 - 모든 문장은 보고서형 음슴체로 작성하세요. 예: "~입니다", "~합니다", "~됩니다" 금지. "~임", "~함", "~됨", "~필요", "~검토 필요"처럼 끝내세요.
 - DDQ 질문과 GP 답변 요지도 한국어로 작성하세요. 영어 원문 답변이 있으면 그대로 복사하지 말고 한국어로 요약하세요.
 - 내부 보고용 간이보고서는 5문장 이내로만 작성하세요.
+- internalReportSummary는 DOCX 03 "심사역 검토 의견" 섹션에 직접 들어갑니다. 반드시 결론 → 투자 매력 → 핵심 리스크 → 추가 확인사항 순서로 작성하세요.
+  - reviewConclusion: 이 건을 추가 검토할지, 보류할지, 드랍할지 한 문장으로 작성. 값 안에 "결론:" 같은 라벨 금지
+  - whyThisDeal: 왜 볼 만한 딜인지 핵심 투자 매력만 작성. 값 안에 "투자 매력:" 같은 라벨 금지
+  - keyRisks: 이 딜을 깨뜨릴 수 있는 핵심 리스크 2~3개만 작성. 값 안에 "핵심 리스크:" 같은 라벨 금지
+  - nextDdItems: 그래서 바로 무엇을 더 받아야 하는지 작성. 값 안에 "추가 확인사항:" 같은 라벨 금지
+  - investmentMemo: 위 4개 항목을 한 번 더 자연어로 요약하되, 네 항목의 순서를 유지
+  - DOCX 03 섹션에는 항목명 라벨을 표시하지 않고 각 bullet 본문만 들어갑니다.
+  - 중립적 리뷰: 장점, 확인 필요 항목, 주요 리스크를 균형 있게 작성
+  - 긍정적 검토: 투자 적합성과 긍정 요소를 먼저 쓰되 조건부 확인사항을 명확히 작성
+  - 보수적 리스크 강조: downside, 원문 대조 필요 항목, 미해결 쟁점을 앞세워 작성
 - 불필요한 일반론, 긴 배경 설명, 중복 문장은 제외하세요.
 - 미팅 개요의 아래 4개 항목은 IM, 사전 브리프, 질문별 답변, 자유 메모, Transcript에서 확인된 값이 있으면 반드시 추출하세요. 확인되지 않은 항목은 지어내지 말고 "확인 필요"로 두세요.
-  - 펀드 규모 / 대출 규모
-  - 투자 기간 / 대출만기
-  - 목표 수익률 / 대출금리
+  - ${metricLabels[0]}
+  - ${metricLabels[1]}
+  - ${metricLabels[2]}
   - 당사 검토 약정액
+검토 유형: ${reviewType || "자동 판단"}
+검토 유형이 loan이면 펀드 규모/투자 기간/목표 수익률은 쓰지 말고 대출 규모/대출만기/대출금리만 쓰세요.
+검토 유형이 fund이면 대출 규모/대출만기/대출금리는 쓰지 말고 펀드 규모/투자 기간/목표 수익률만 쓰세요.
 
 세팅값:
 ${JSON.stringify(state.meeting, null, 2)}
@@ -1662,15 +1729,20 @@ ${state.transcript}
   "followUpEmailDraft": "운용사에게 보낼 이메일 초안",
   "internalReportSummary": {
     "oneLineView": "한 줄 검토 의견",
-    "investmentMemo": "심사역 검토 의견. 5문장 이내, DOCX 03 섹션에 들어갈 내용",
+    "reviewConclusion": "추가 검토/보류/드랍/조건부 진행 중 하나가 바로 보이는 본문만 작성. '결론:' 라벨 금지",
+    "whyThisDeal": "IRR, 담보, 입지, GP 역량, 구조적 보호장치, 시장 타이밍 등 핵심 투자 매력 본문만 작성. '투자 매력:' 라벨 금지",
+    "keyRisks": "가장 중요한 위험 2~3개 본문만 작성. '핵심 리스크:' 라벨 금지",
+    "nextDdItems": "미팅 후 바로 받아야 할 자료와 확인 액션 본문만 작성. '추가 확인사항:' 라벨 금지",
+    "investmentMemo": "심사역 검토 의견. 결론 → 투자 매력 → 핵심 리스크 → 추가 확인사항 순서로 4문장 내외",
     "riskView": "리스크 관점"
   },
   "meetingOverview": {
+    "reviewType": "${reviewType || "fund 또는 loan"}",
     "location": "장소. 확인되지 않으면 확인 필요",
     "regionAssetClass": "지역 / 자산군 / 섹터 / 전략 / Equity·Debt 요약",
-    "sizeOrLoanAmount": "펀드 규모 / 대출 규모. IM 또는 Q&A에서 확인된 값",
-    "periodOrMaturity": "투자 기간 / 대출만기. IM 또는 Q&A에서 확인된 값",
-    "returnOrLoanRate": "목표 수익률 / 대출금리. IM 또는 Q&A에서 확인된 값",
+    "sizeOrLoanAmount": "${metricLabels[0]}. IM 또는 Q&A에서 확인된 값",
+    "periodOrMaturity": "${metricLabels[1]}. IM 또는 Q&A에서 확인된 값",
+    "returnOrLoanRate": "${metricLabels[2]}. IM 또는 Q&A에서 확인된 값",
     "commitmentAmount": "당사 검토 약정액. 확인되지 않으면 확인 필요"
   },
   "nextActionItems": ["다음 액션"],
@@ -1904,7 +1976,7 @@ function normalizeBrief(brief) {
   const imIssueQuestions = buildImIssueQuestions();
   const normalizedQaList = normalizeExpectedQaList(expectedQaList, imIssueQuestions);
   return {
-    fundSnapshot: brief.fundSnapshot || {},
+    fundSnapshot: normalizeBriefSnapshot(brief.fundSnapshot || {}),
     classificationSummary: brief.classificationSummary || {},
     marketContext: normalizeBriefMarketContext(brief.marketContext || {}),
     expectedQaList: normalizedQaList,
@@ -1913,6 +1985,78 @@ function normalizeBrief(brief) {
     expectedFollowUpRequests: asArray(brief.expectedFollowUpRequests),
     verificationItems: mergeTextLists([...asArray(brief.verificationItems), ...imIssueQuestions.map((item) => item.rationale)])
   };
+}
+
+function normalizeBriefSnapshot(snapshot = {}) {
+  const reviewType = resolveReviewType(deriveEffectiveMeetingInfo(), snapshot, state.imProcessingResult?.imAnalysis || {});
+  const normalized = { ...snapshot };
+  const meeting = state.meeting || {};
+  const userFacts = deriveUserProvidedDealFacts();
+  if (isMeaningfulFact(meeting.managerName)) normalized.managerName = meeting.managerName;
+  if (isMeaningfulFact(meeting.fundName)) normalized.fundName = meeting.fundName;
+  if (isMeaningfulFact(meeting.strategy)) normalized.strategy = meeting.strategy;
+  if (isMeaningfulFact(meeting.investmentStructure || meeting.capitalType)) normalized.capitalStructure = meeting.investmentStructure || meeting.capitalType;
+  if (isMeaningfulFact(userFacts.region)) normalized.region = userFacts.region;
+  if (isMeaningfulFact(meeting.assetClass) || isMeaningfulFact(meeting.sector)) {
+    normalized.assetClass = [meeting.assetClass, meeting.sector].filter(isMeaningfulFact).join(" / ");
+  }
+  if (reviewType === "loan") {
+    delete normalized.targetSize;
+    delete normalized.investmentPeriod;
+    delete normalized.targetReturn;
+    if (isMeaningfulFact(userFacts.loanSize)) normalized.loanSize = userFacts.loanSize;
+    if (isMeaningfulFact(userFacts.loanMaturity)) normalized.loanMaturity = userFacts.loanMaturity;
+    if (isMeaningfulFact(userFacts.loanRate)) normalized.loanRate = userFacts.loanRate;
+  } else if (reviewType === "fund") {
+    delete normalized.loanSize;
+    delete normalized.loanMaturity;
+    delete normalized.loanRate;
+  }
+  return normalized;
+}
+
+function deriveUserProvidedDealFacts() {
+  const text = [state.meeting?.fundName, state.meeting?.keyConcerns].filter(Boolean).join("\n");
+  return {
+    region: extractUserRegion(text),
+    loanSize: extractUserLoanSize(text),
+    loanMaturity: extractUserLoanMaturity(text),
+    loanRate: extractUserLoanRate(text)
+  };
+}
+
+function extractUserRegion(text = "") {
+  const value = String(text || "");
+  const provinceCity = value.match(/([가-힣]+도\s*[가-힣]+시)/);
+  if (provinceCity) return provinceCity[1].replace(/\s+/g, " ");
+  const cityDistrict = value.match(/([가-힣]+시\s*[가-힣0-9]+지구)/);
+  if (cityDistrict) return cityDistrict[1].replace(/\s+/g, " ");
+  const district = value.match(/([가-힣0-9]+지구|[가-힣]+시|[가-힣]+군|[가-힣]+구)/);
+  return district ? district[1] : "";
+}
+
+function extractUserLoanSize(text = "") {
+  const value = String(text || "");
+  const match = value.match(/(?:총\s*)?(?:대출\s*규모|대출액|합계)[^.\n]{0,80}?([\d,]+)\s*억/) || value.match(/([\d,]+)\s*억(?:원)?\s*(?:합계|규모)/);
+  return match ? `${match[1]}억원` : "";
+}
+
+function extractUserLoanMaturity(text = "") {
+  const value = String(text || "");
+  const match = value.match(/(?:대출기간|대출\s*만기|만기)[^.\n]{0,60}?(\d+)\s*개월/) || value.match(/최초\s*인출일로부터\s*(\d+)\s*개월/);
+  return match ? `최초 인출일로부터 ${match[1]}개월` : "";
+}
+
+function extractUserLoanRate(text = "") {
+  const value = String(text || "");
+  const trA = value.match(/Tr\.?\s*A[^.\n]{0,60}?(\d+(?:\.\d+)?)\s*%/i);
+  const allIn = value.match(/All-?in[^.\n]{0,40}?(\d+(?:\.\d+)?)\s*~\s*(\d+(?:\.\d+)?)\s*%/i);
+  const fund = value.match(/(?:주택도시기금|기금)[^.\n]{0,50}?(\d+(?:\.\d+)?)\s*%/);
+  const parts = [];
+  if (trA) parts.push(`Tr.A ${trA[1]}%`);
+  if (allIn) parts.push(`All-in ${allIn[1]}~${allIn[2]}%`);
+  if (fund) parts.push(`주택도시기금 ${fund[1]}%`);
+  return parts.join(", ");
 }
 
 function normalizeBriefMarketContext(context = {}) {
@@ -2075,12 +2219,12 @@ function mergeTextLists(items) {
 
 function normalizeQuestionForDealType(item) {
   if (!item || typeof item !== "object") return item;
-  if (!isDirectLoanLikeCase()) return item;
-  return {
+  const normalized = {
     ...item,
-    question: rewriteFundOnlyQuestion(item.question),
-    rationale: rewriteFundOnlyQuestion(item.rationale)
+    question: isDirectLoanLikeCase() ? rewriteFundOnlyQuestion(item.question) : item.question,
+    rationale: isDirectLoanLikeCase() ? rewriteFundOnlyQuestion(item.rationale) : item.rationale
   };
+  return softenUnsupportedRoleAssertion(normalized);
 }
 
 function rewriteFundOnlyQuestion(value) {
@@ -2090,6 +2234,21 @@ function rewriteFundOnlyQuestion(value) {
     .replace(/펀드명/g, "펀드명 / 대출명")
     .replace(/정확한 명칭과 투자 구조\(Senior Debt 외 다른 트랜치 존재 여부 등\)는 어떻게 됩니까\?/g, "정확한 대출명, 차주/담보 구조, 선순위성 및 주요 약정 조건은 어떻게 됩니까?")
     .replace(/Senior Debt 외 다른 트랜치 존재 여부/g, "후순위/메자닌 동반 여부가 실제로 필요한 경우 그 사유");
+}
+
+function softenUnsupportedRoleAssertion(item) {
+  const text = [item.category, item.question, item.rationale, item.source].filter(Boolean).join(" ");
+  const roleAssertion = /(운용사|GP|사업주체|주관|주요주주|시공사|신탁사).*(불일치|확인됩니다|확인됨|주관으로|기재되어 있으나|역할)/i.test(text);
+  const namedPartyMix = /(월넛|이지스|자산운용|PFV|피에프브이|사업주체|주요주주)/i.test(text) && /(역할|법적\s*지위|불일치|주관)/i.test(text);
+  if (!roleAssertion && !namedPartyMix) return item;
+  return {
+    ...item,
+    category: "Alignment",
+    importance: item.importance === "Low" ? "Medium" : item.importance || "Medium",
+    question: "사용자 입력 운용사와 IM상 사업주체·주주·운용 관련 당사자의 역할이 혼재되어 보입니다. 본 건에서 각 당사자의 역할, 법적 지위, 책임 범위 및 대주단과의 계약상 관계는 어떻게 정리됩니까?",
+    rationale: "관계자 역할을 단정하지 않고 계약상 책임 주체와 이해관계 정렬 여부를 확인할 필요가 있음",
+    source: item.source || "IM/사용자 입력 역할 확인"
+  };
 }
 
 function isDirectLoanLikeCase() {
@@ -2456,6 +2615,7 @@ function getQuestionRecordsForReport() {
 function buildDocxMemoData() {
   const memo = state.postMeetingMemo || {};
   const tone = getReportToneConfig(state.reportTone);
+  const summary = memo.internalReportSummary || {};
   const questions = (state.questionRecords || []).slice(0, 5);
   const risks = [
     ...asArray(state.preMeetingBrief?.keyRisks),
@@ -2465,7 +2625,11 @@ function buildDocxMemoData() {
   const snapshot = state.preMeetingBrief?.fundSnapshot || {};
   const imAnalysis = state.imProcessingResult?.imAnalysis || {};
   const effectiveMeeting = deriveEffectiveMeetingInfo(memo);
-  const overviewFacts = deriveMeetingOverviewFacts(memo, snapshot, imAnalysis);
+  const rawOverviewFacts = deriveMeetingOverviewFacts(memo, snapshot, imAnalysis);
+  const reviewType = resolveReviewType(effectiveMeeting, rawOverviewFacts, imAnalysis);
+  const overviewFacts = normalizeOverviewFactsForReviewType(rawOverviewFacts, reviewType);
+  const overviewMetricRows = buildOverviewMetricRows(overviewFacts, reviewType);
+  const assetName = deriveAssetNameForMemo(effectiveMeeting, snapshot, imAnalysis, memo);
   const classificationParts = [
     localizeDisplayTerm(effectiveMeeting.locationType),
     localizeDisplayTerm(effectiveMeeting.assetClass),
@@ -2475,8 +2639,11 @@ function buildDocxMemoData() {
   ].filter(Boolean);
   const data = {
     title: "LP Meeting Review Memo",
+    reviewType,
+    assetName,
+    subjectLabel: reviewType === "fund" ? "펀드명" : reviewType === "loan" ? "대출명" : "펀드명 / 대출명",
     managerName: effectiveMeeting.managerName || "운용사 확인 필요",
-    fundName: effectiveMeeting.fundName || "펀드명 / 대출명 확인 필요",
+    fundName: effectiveMeeting.fundName || assetName || "펀드명 / 대출명 확인 필요",
     contactName: effectiveMeeting.gpParticipants || effectiveMeeting.contactName || "",
     gpAttendees: effectiveMeeting.gpParticipants || effectiveMeeting.contactName || "",
     lpAttendees: effectiveMeeting.lpParticipants || "",
@@ -2488,19 +2655,23 @@ function buildDocxMemoData() {
     periodOrMaturity: overviewFacts.periodOrMaturity || "",
     returnOrLoanRate: overviewFacts.returnOrLoanRate || "",
     commitmentAmount: overviewFacts.commitmentAmount || "",
+    overviewMetricRows,
     status: tone.status,
     reviewOpinion: tone.reviewOpinion,
-    oneLineView: formatListItemText(memo.internalReportSummary?.oneLineView) || "핵심 결론 확인 필요",
+    oneLineView: formatListItemText(summary.oneLineView) || "핵심 결론 확인 필요",
+    reviewConclusion: formatListItemText(summary.reviewConclusion) || formatListItemText(summary.oneLineView) || "",
+    whyThisDeal: formatListItemText(summary.whyThisDeal || summary.investmentMerits || summary.dealMerits || summary.whyDeal) || "",
+    keyRisksForOpinion: formatListItemText(summary.keyRisks || summary.keyRiskSummary || summary.riskView) || "",
+    nextDdItemsForOpinion: formatListItemText(summary.nextDdItems || summary.nextDdItemsSummary || summary.followUpSummary) || "",
     evidence: deriveExecutiveEvidence(memo),
+    merits: asArray(state.preMeetingBrief?.keyInvestmentMerits).slice(0, 4),
     overview: [
       ["GP / 건명", `${effectiveMeeting.managerName || "확인 필요"} / ${effectiveMeeting.fundName || "확인 필요"}`],
       ["투자 지역", localizeDisplayTerm(effectiveMeeting.locationType) || "확인 필요"],
       ["자산군 / 전략", `${localizeDisplayTerm(effectiveMeeting.assetClass) || "확인 필요"} / ${localizeDisplayTerm(effectiveMeeting.strategy) || "확인 필요"}`],
       ["섹터 / 구조", `${localizeDisplayTerm(effectiveMeeting.sector) || "확인 필요"} / ${localizeDisplayTerm(effectiveMeeting.investmentStructure || effectiveMeeting.capitalType) || "확인 필요"}`],
       ["딜 / 자산 메모", effectiveMeeting.keyConcerns || "확인 필요"],
-      ["펀드 규모 / 대출 규모", overviewFacts.sizeOrLoanAmount || "확인 필요"],
-      ["투자 기간 / 대출만기", overviewFacts.periodOrMaturity || "확인 필요"],
-      ["목표 수익률 / 대출금리", overviewFacts.returnOrLoanRate || "확인 필요"],
+      ...overviewMetricRows,
       ["당사 검토 약정액", overviewFacts.commitmentAmount || "직접 입력"]
     ],
     ddq: questions.map((question, index) => ({
@@ -2510,12 +2681,180 @@ function buildDocxMemoData() {
     })),
     risks: risks.length ? risks : ["원문 계약서 및 추가 DD 전까지 핵심 리스크 확인 필요"],
     followUps: asArray(followUps).slice(0, 3),
-    finalOpinion: formatListItemText(memo.internalReportSummary?.investmentMemo) || "본건은 추가 DD 결과 확인 후 투심 상정 여부를 판단하는 것이 적절함",
-    riskView: formatListItemText(memo.internalReportSummary?.riskView) || "",
+    finalOpinion: formatListItemText(summary.investmentMemo) || "본건은 추가 DD 결과 확인 후 투심 상정 여부 판단 필요",
+    riskView: formatListItemText(summary.riskView) || "",
     nextActions: asArray(memo.nextActionItems).slice(0, 6),
     sourceChecks: asArray(memo.sourceVerificationItems).slice(0, 6)
   };
   return normalizeDocxMemoTone(data);
+}
+
+function deriveAssetNameForMemo(effectiveMeeting = {}, snapshot = {}, imAnalysis = {}, memo = {}) {
+  const detected = imAnalysis.autoDetectedFields || {};
+  const imSnapshot = imAnalysis.fundSnapshot || {};
+  const reportOverview = memo.meetingOverview || memo.investmentOverview || {};
+  const name = pickFirstMeaningful([
+    effectiveMeeting.assetName,
+    effectiveMeeting.fundName,
+    snapshot.assetName,
+    snapshot.projectName,
+    snapshot.dealName,
+    snapshot.loanName,
+    snapshot.fundName,
+    imSnapshot.assetName,
+    imSnapshot.projectName,
+    imSnapshot.dealName,
+    imSnapshot.loanName,
+    imSnapshot.fundName,
+    detected.assetName,
+    detected.projectName,
+    detected.dealName,
+    detected.loanName,
+    detected.fundName,
+    reportOverview.assetName,
+    reportOverview.projectName,
+    reportOverview.dealName,
+    reportOverview.loanName
+  ]);
+  if (name) return assetNameForMemoTitle(name);
+  const fallback = [
+    effectiveMeeting.locationType,
+    effectiveMeeting.sector,
+    effectiveMeeting.strategy,
+    effectiveMeeting.capitalType
+  ].map(localizeDisplayTerm).filter(Boolean).join(" ");
+  return assetNameForMemoTitle(fallback || "자산명 확인 필요");
+}
+
+function resolveReviewType(effectiveMeeting = {}, overviewFacts = {}, imAnalysis = {}) {
+  const detected = imAnalysis.autoDetectedFields || {};
+  const imSnapshot = imAnalysis.fundSnapshot || {};
+  const explicit = normalizeReviewType(state.meeting?.dealType || effectiveMeeting.dealType || detected.dealType || imSnapshot.dealType);
+  if (explicit) return explicit;
+  const text = [
+    state.meeting?.fundName,
+    state.meeting?.keyConcerns,
+    effectiveMeeting.fundName,
+    effectiveMeeting.assetClass,
+    effectiveMeeting.strategy,
+    effectiveMeeting.capitalType,
+    effectiveMeeting.investmentStructure,
+    overviewFacts.sizeOrLoanAmount,
+    overviewFacts.periodOrMaturity,
+    overviewFacts.returnOrLoanRate,
+    JSON.stringify(imAnalysis || {}),
+    state.imProcessingResult?.textExcerpt
+  ].filter(Boolean).join(" ");
+  return inferReviewTypeFromText(text);
+}
+
+function normalizeReviewType(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text || text === "auto" || text === "자동" || text === "자동 판단") return "";
+  if (/loan|debt|credit|대출|여신|pf|담보대출|프로젝트파이낸싱|facility/.test(text)) return "loan";
+  if (/fund|펀드|출자|commitment|블라인드|blind|separate account|세컨더리|secondary|buyout|growth/.test(text)) return "fund";
+  return "";
+}
+
+function inferReviewTypeFromText(value) {
+  const text = String(value || "").toLowerCase();
+  const loanScore = [
+    /대출/, /pf/, /프로젝트\s*파이낸싱/, /담보대출/, /대출금리/, /대출만기/, /차주/, /대주/, /tr\.\s*a/,
+    /loan/, /facility/, /senior debt/, /credit/, /borrower/, /lender/, /ltv/
+  ].reduce((score, pattern) => score + (pattern.test(text) ? 1 : 0), 0);
+  const fundScore = [
+    /펀드/, /블라인드/, /출자/, /약정액/, /목표\s*수익률/, /투자\s*기간/, /net\s*irr/, /gross\s*irr/, /moic/,
+    /fund/, /lp commitment/, /capital call/, /buyout/, /growth capital/, /venture/
+  ].reduce((score, pattern) => score + (pattern.test(text) ? 1 : 0), 0);
+  if (loanScore >= 2 && loanScore >= fundScore) return "loan";
+  if (fundScore >= 2) return "fund";
+  return "";
+}
+
+function normalizeOverviewFactsForReviewType(facts = {}, reviewType = "") {
+  const normalized = {
+    ...facts,
+    sizeOrLoanAmount: selectMetricValueForReviewType(facts.sizeOrLoanAmount, reviewType, "size"),
+    periodOrMaturity: selectMetricValueForReviewType(facts.periodOrMaturity, reviewType, "period"),
+    returnOrLoanRate: selectMetricValueForReviewType(facts.returnOrLoanRate, reviewType, "return")
+  };
+  const userFacts = deriveUserProvidedDealFacts();
+  const meeting = state.meeting || {};
+  const userRegionAssetClass = [
+    userFacts.region,
+    meeting.assetClass,
+    meeting.sector,
+    meeting.strategy,
+    meeting.capitalType
+  ].filter(isMeaningfulFact).join(" / ");
+  if (isMeaningfulFact(userRegionAssetClass)) normalized.regionAssetClass = userRegionAssetClass;
+  if (reviewType === "loan") {
+    if (isMeaningfulFact(userFacts.loanSize)) normalized.sizeOrLoanAmount = userFacts.loanSize;
+    if (isMeaningfulFact(userFacts.loanMaturity)) normalized.periodOrMaturity = userFacts.loanMaturity;
+    if (isMeaningfulFact(userFacts.loanRate)) normalized.returnOrLoanRate = userFacts.loanRate;
+  }
+  return normalized;
+}
+
+function buildOverviewMetricRows(facts = {}, reviewType = "") {
+  if (reviewType === "loan") {
+    return [
+      ["대출 규모", facts.sizeOrLoanAmount || "확인 필요"],
+      ["대출만기", facts.periodOrMaturity || "확인 필요"],
+      ["대출금리", facts.returnOrLoanRate || "확인 필요"]
+    ];
+  }
+  if (reviewType === "fund") {
+    return [
+      ["펀드 규모", facts.sizeOrLoanAmount || "확인 필요"],
+      ["투자 기간", facts.periodOrMaturity || "확인 필요"],
+      ["목표 수익률", facts.returnOrLoanRate || "확인 필요"]
+    ];
+  }
+  return [
+    ["펀드 규모 / 대출 규모", facts.sizeOrLoanAmount || "확인 필요"],
+    ["투자 기간 / 대출만기", facts.periodOrMaturity || "확인 필요"],
+    ["목표 수익률 / 대출금리", facts.returnOrLoanRate || "확인 필요"]
+  ];
+}
+
+function selectMetricValueForReviewType(value, reviewType, metricKind) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text || !reviewType) return text;
+  const parts = splitPairedMetricValue(text);
+  const selected = reviewType === "loan" ? parts.loan : parts.fund;
+  if (isMeaningfulMetricValue(selected)) return selected;
+  if (parts.wasSplit) return selected || "확인 필요";
+  if (reviewType === "fund" && metricLooksLoanOnly(text, metricKind)) return "확인 필요";
+  if (reviewType === "loan" && metricLooksFundOnly(text, metricKind)) return "확인 필요";
+  return text;
+}
+
+function splitPairedMetricValue(value) {
+  const text = String(value || "").trim();
+  const separators = /\s+\/\s+|\s*;\s*/;
+  const parts = text.split(separators).map((item) => item.trim()).filter(Boolean);
+  if (parts.length >= 2) return { fund: parts[0], loan: parts.slice(1).join(" / "), wasSplit: true };
+  return { fund: text, loan: text, wasSplit: false };
+}
+
+function isMeaningfulMetricValue(value) {
+  const text = String(value || "").trim();
+  return Boolean(text) && !/^(확인\s*필요|미확인|n\/a|na|null|undefined|-|없음)$/i.test(text);
+}
+
+function metricLooksLoanOnly(value, metricKind) {
+  const text = String(value || "");
+  if (metricKind === "period") return /대출만기|loan maturity|tenor|최초\s*인출|만기/i.test(text) && !/투자\s*기간|holding/i.test(text);
+  if (metricKind === "return") return /대출금리|loan rate|interest|coupon|tr\.\s*a|주택도시기금|금리/i.test(text) && !/irr|moic|목표\s*수익률|target return/i.test(text);
+  return /대출\s*규모|loan size|facility|대출금액/i.test(text) && !/펀드\s*규모|fund size/i.test(text);
+}
+
+function metricLooksFundOnly(value, metricKind) {
+  const text = String(value || "");
+  if (metricKind === "period") return /투자\s*기간|holding period|fund life/i.test(text) && !/대출만기|loan maturity|최초\s*인출/i.test(text);
+  if (metricKind === "return") return /irr|moic|목표\s*수익률|target return|net return/i.test(text) && !/대출금리|loan rate|interest|tr\.\s*a/i.test(text);
+  return /펀드\s*규모|fund size|target size|모집\s*규모/i.test(text) && !/대출\s*규모|loan size|facility/i.test(text);
 }
 
 function deriveEffectiveMeetingInfo(memo = state.postMeetingMemo || {}) {
@@ -2594,6 +2933,16 @@ function deriveEffectiveMeetingInfo(memo = state.postMeetingMemo || {}) {
       detected.investmentStructure,
       findStructuredFact(structuredSources, ["capitalType", "capitalStructure", "equityDebt", "투자구조", "구조"])
     ])),
+    dealType: normalizeReviewType(pickFirstMeaningful([
+      meeting.dealType,
+      reportOverview.dealType,
+      reportOverview.reviewType,
+      briefSnapshot.dealType,
+      imSnapshot.dealType,
+      detected.dealType,
+      detected.reviewType,
+      findStructuredFact(structuredSources, ["dealType", "reviewType", "transactionType", "검토유형", "거래유형"])
+    ])),
     investmentStructure: pickFirstMeaningful([
       meeting.investmentStructure,
       briefSnapshot.investmentStructure,
@@ -2605,6 +2954,7 @@ function deriveEffectiveMeetingInfo(memo = state.postMeetingMemo || {}) {
     ])
   };
   if (!raw.capitalType) raw.capitalType = inferCapitalType(raw.investmentStructure || "");
+  if (!raw.dealType) raw.dealType = inferReviewTypeFromText(textSource);
   if (!raw.investmentStructure && raw.capitalType) {
     raw.investmentStructure = pickKnownCapitalStructure(raw.capitalType, raw.investmentStructure);
   }
@@ -3478,23 +3828,34 @@ function stylesXml() {
 
 function applyFinalWantedTemplate(templateXml, data) {
   let xml = templateXml;
-  xml = replaceTemplateLiteral(xml, "{{자산명}} 검토 메모", `${assetNameForMemoTitle(data.fundName)} 검토 메모`);
+  const assetName = assetNameForMemoTitle(data.assetName || data.fundName);
+  xml = replaceAssetNamePlaceholder(xml, assetName);
+  xml = replaceTemplateLiteral(xml, "{{자산명}} 검토 메모", `${assetName} 검토 메모`);
   xml = replaceTemplateLiteral(xml, "본 메모는 투자 결정을 위한 내부 검토 자료이며, 외부 유출이 엄격히 금지됩니다.", "본 메모는 투자 결정을 위한 내부 검토 자료이며, 외부 유출이 엄격히 금지됨.");
 
   const tables = getXmlBlocks(xml, "tbl");
-  if (tables.length < 11) throw new Error("DOCX_FINAL_WANTED.docx 템플릿 표 구조를 확인하지 못했습니다.");
+  if (tables.length < 4) throw new Error("DOCX_FINAL_WANTED.docx 템플릿 표 구조를 확인하지 못했습니다.");
 
   const updatedTables = [...tables];
-  updatedTables[1] = fillTemplateSummaryTable(tables[1], data);
-  updatedTables[3] = fillTemplateOverviewTable(tables[3], data);
-  updatedTables[6] = fillTemplateDdqTable(tables[6], data, 5);
-  updatedTables[8] = fillTemplateRiskTable(tables[8], data, 6);
-  updatedTables[10] = fillTemplateFollowUpTable(tables[10], data, 8);
+  const summaryIndex = findTemplateTableIndex(tables, ["01", "요약"], 1);
+  const overviewIndex = findTemplateTableIndex(tables, ["02", "미팅개요"], 3);
+  const opinionIndex = findTemplateTableIndex(tables, ["03", "심사역검토의견"], -1);
+  const ddqIndex = findTemplateTableIndex(tables, ["04", "핵심DDQ"], 6);
+  const riskIndex = findTemplateTableIndex(tables, ["구분", "리스크내용", "심각도", "당사View"], 8);
+  const followUpIndex = findTemplateTableIndex(tables, ["No.", "Follow-up항목", "담당", "기한"], 10);
+
+  updateTemplateTable(updatedTables, tables, summaryIndex, fillTemplateSummaryTable, data);
+  updateTemplateTable(updatedTables, tables, overviewIndex, fillTemplateOverviewTable, data);
+  updateTemplateTable(updatedTables, tables, opinionIndex, fillTemplateOpinionTable, data);
+  updateTemplateTable(updatedTables, tables, ddqIndex, fillTemplateDdqTable, data, 5);
+  updateTemplateTable(updatedTables, tables, riskIndex, fillTemplateRiskTable, data, 6);
+  updateTemplateTable(updatedTables, tables, followUpIndex, fillTemplateFollowUpTable, data, 8);
 
   updatedTables.forEach((table, index) => {
     if (table !== tables[index]) xml = replaceXmlBlockAt(xml, "tbl", index, table);
   });
 
+  if (opinionIndex < 0) xml = replaceTemplateOpinionSection(xml, data);
   const opinions = deriveTemplateOpinionLines(data, 5);
   TEMPLATE_OPINION_TEXTS.forEach((text, index) => {
     xml = replaceTemplateLiteral(xml, text, opinions[index] || "");
@@ -3502,35 +3863,73 @@ function applyFinalWantedTemplate(templateXml, data) {
   return xml;
 }
 
+function updateTemplateTable(updatedTables, originalTables, index, filler, ...args) {
+  if (index < 0 || !originalTables[index]) return;
+  updatedTables[index] = filler(originalTables[index], ...args);
+}
+
+function findTemplateTableIndex(tables, requiredTexts, fallbackIndex = -1) {
+  const normalizedNeedles = requiredTexts.map(normalizeWordSectionText);
+  const found = tables.findIndex((table) => {
+    const text = normalizeWordSectionText(getWordText(table));
+    return normalizedNeedles.every((needle) => text.includes(needle));
+  });
+  if (found >= 0) return found;
+  return tables[fallbackIndex] ? fallbackIndex : -1;
+}
+
 function assetNameForMemoTitle(value) {
   return String(value || "자산명 확인 필요").replace(/\s*검토\s*$/g, "").trim() || "자산명 확인 필요";
 }
 
-function fillTemplateSummaryTable(tableXml, data) {
-  const lines = [
-    `펀드명 / 대출명: ${data.fundName || "확인 필요"}`,
-    `운용사(GP): ${data.managerName || "확인 필요"}`,
-    `미팅일자: ${formatKoreanDate(data.meetingDate)}`,
-    `검토 결과: ${data.reviewOpinion || "확인 필요"}`,
-    `심사역 의견: ${limitSentences(data.finalOpinion || data.oneLineView || "추가 DD 필요", 2)}`
-  ];
-  return setSingleRowTableCells(tableXml, [lines]);
-}
-
-function fillTemplateOverviewTable(tableXml, data) {
+function buildMeetingOverviewRowsForDocx(data) {
   const overview = Object.fromEntries(data.overview || []);
-  const rows = [
+  const metricRows = asArray(data.overviewMetricRows).length
+    ? data.overviewMetricRows
+    : buildOverviewMetricRows({
+      sizeOrLoanAmount: data.sizeOrLoanAmount || overview["펀드 규모 / 대출 규모"] || overview["펀드 규모"] || overview["대출 규모"],
+      periodOrMaturity: data.periodOrMaturity || overview["투자 기간 / 대출만기"] || overview["투자 기간"] || overview["대출만기"],
+      returnOrLoanRate: data.returnOrLoanRate || overview["목표 수익률 / 대출금리"] || overview["목표 수익률"] || overview["대출금리"]
+    }, data.reviewType);
+  return [
     ["미팅 일시", formatKoreanDate(data.meetingDate)],
     ["장소", data.meetingLocation || "확인 필요"],
     ["GP 참석자", data.gpAttendees || data.contactName || "확인 필요"],
     ["당사 참석자", data.lpAttendees || `${profile.name || "담당자 확인 필요"} / ${profile.department || "부서 확인 필요"}`],
     ["지역 / 자산군", data.regionAssetClass || [overview["투자 지역"], data.classification].filter(Boolean).join(" / ") || "확인 필요"],
-    ["펀드 규모 / 대출 규모", data.sizeOrLoanAmount || overview["펀드 규모 / 대출 규모"] || "확인 필요"],
-    ["투자 기간 / 대출만기", data.periodOrMaturity || overview["투자 기간 / 대출만기"] || "확인 필요"],
-    ["목표 수익률 / 대출금리", data.returnOrLoanRate || overview["목표 수익률 / 대출금리"] || "확인 필요"],
+    ...metricRows,
     ["당사 검토 약정액", data.commitmentAmount || overview["당사 검토 약정액"] || "직접 입력"]
   ];
-  return setExistingTableRows(tableXml, rows, { normalizeValueCells: true });
+}
+
+function fillTemplateSummaryTable(tableXml, data) {
+  const summaryOpinion = buildSummaryOpinionText(data);
+  const lines = [
+    `${data.subjectLabel || "펀드명 / 대출명"}: ${data.fundName || data.assetName || "확인 필요"}`,
+    `운용사(GP): ${data.managerName || "확인 필요"}`,
+    `미팅일자: ${formatKoreanDate(data.meetingDate)}`,
+    `검토 결과: ${data.reviewOpinion || "확인 필요"}`,
+    `심사역 의견: ${summaryOpinion || "확인된 딜 정체성과 추가 DD 필요사항 확인 필요"}`
+  ];
+  return hasSectionHeaderRow(tableXml, "01")
+    ? setExistingTableRows(tableXml, [[lines]], { startRow: 1, normalizeValueCells: true })
+    : setSingleRowTableCells(tableXml, [lines]);
+}
+
+function fillTemplateOverviewTable(tableXml, data) {
+  const rows = buildMeetingOverviewRowsForDocx(data);
+  return setExistingTableRows(tableXml, rows, { startRow: hasSectionHeaderRow(tableXml, "02") ? 1 : 0, normalizeValueCells: true });
+}
+
+function fillTemplateOpinionTable(tableXml, data) {
+  const lines = deriveStructuredReviewOpinionLines(data);
+  const rows = [
+    ["검토 의견 요약", lines[0] || "검토 의견 확인 필요"],
+    ["투자 Highlight", lines[1] || "투자 매력 확인 필요"],
+    ["핵심 리스크", lines[2] || "핵심 리스크 확인 필요"],
+    ["추가 확인사항", lines[3] || "추가 확인사항 확인 필요"]
+  ];
+  return setExistingTableRows(tableXml, rows, { startRow: hasSectionHeaderRow(tableXml, "03") ? 1 : 0, normalizeValueCells: true });
 }
 
 function fillTemplateDdqTable(tableXml, data, limit) {
@@ -3540,7 +3939,7 @@ function fillTemplateDdqTable(tableXml, data, limit) {
     normalizeReportLanguage(item.question || "질문 확인 필요"),
     normalizeReportLanguage(item.answer || "미답변 / 추가 확인 필요")
   ]);
-  return rebuildTableWithDataRows(tableXml, ddqRows);
+  return rebuildTableWithDataRows(tableXml, ddqRows, { headerRows: hasSectionHeaderRow(tableXml, "04") ? 2 : 1 });
 }
 
 function fillTemplateRiskTable(tableXml, data, limit) {
@@ -3564,14 +3963,219 @@ function fillTemplateFollowUpTable(tableXml, data, limit) {
   return rebuildTableWithDataRows(tableXml, rows);
 }
 
+function hasSectionHeaderRow(tableXml, sectionNo) {
+  const rows = getXmlBlocks(tableXml, "tr");
+  if (!rows.length) return false;
+  const firstText = normalizeWordSectionText(getWordText(rows[0]));
+  return firstText.startsWith(String(sectionNo));
+}
+
 function deriveTemplateOpinionLines(data, limit) {
-  const lines = [
-    data.oneLineView,
-    ...asArray(data.evidence),
-    data.riskView,
-    data.finalOpinion
-  ].filter(Boolean).map((item) => limitSentences(formatListItemText(item), 2));
+  const structured = deriveStructuredReviewOpinionLines(data);
+  if (structured.length) return structured.slice(0, limit);
+  const lines = mergeTextLists([
+    ...splitOpinionText(data.finalOpinion),
+    ...splitOpinionText(data.oneLineView),
+    ...splitOpinionText(data.riskView),
+    ...asArray(data.evidence).flatMap(splitOpinionText)
+  ]).map((item) => limitSentences(formatListItemText(item), 2)).filter(Boolean);
   return lines.slice(0, limit);
+}
+
+function deriveStructuredReviewOpinionLines(data = {}) {
+  const conclusion = ensureDealIdentityInOpinion(firstUsefulText([
+    data.reviewConclusion,
+    data.oneLineView,
+    inferConclusionFromTone(data)
+  ]), data);
+  const whyThisDeal = firstUsefulText([
+    data.whyThisDeal,
+    compactListText(data.merits, 3),
+    compactListText(data.evidence, 2),
+    "투자 매력 확인 필요"
+  ]);
+  const keyRisks = firstUsefulText([
+    data.keyRisksForOpinion,
+    data.riskView,
+    compactListText(data.risks, 3),
+    "핵심 리스크 확인 필요"
+  ]);
+  const nextDdItems = firstUsefulText([
+    data.nextDdItemsForOpinion,
+    compactListText(data.followUps, 3),
+    compactListText(data.sourceChecks, 3),
+    "추가 확인자료 및 원문 대조 필요"
+  ]);
+  return [
+    [conclusion, 2],
+    [whyThisDeal, 2],
+    [keyRisks, 2],
+    [nextDdItems, 2]
+  ].map(([value, limit]) => cleanReviewOpinionBody(limitSentences(formatListItemText(value), limit)))
+    .filter(isMeaningfulFact);
+}
+
+function cleanReviewOpinionBullet(value) {
+  return String(value || "")
+    .replace(/^\s*(?:[-•·]\s*)?(?:결론|투자\s*매력\s*(?:\/\s*Why\s*This\s*Deal)?|Why\s*This\s*Deal|핵심\s*리스크\s*(?:\/\s*Key\s*Risks)?|Key\s*Risks|추가\s*확인\s*사항\s*(?:\/\s*Next\s*DD\s*Items)?|Next\s*DD\s*Items)\s*[:：-]\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function firstUsefulText(values) {
+  return values.map(formatListItemText).find(isMeaningfulFact) || "";
+}
+
+function compactListText(items, limit = 3) {
+  return asArray(items)
+    .map(formatListItemText)
+    .filter(isMeaningfulFact)
+    .slice(0, limit)
+    .join("; ");
+}
+
+function buildSummaryOpinionText(data = {}) {
+  const baseOpinion = firstUsefulText([
+    data.finalOpinion,
+    data.reviewConclusion,
+    data.oneLineView,
+    inferConclusionFromTone(data)
+  ]);
+  return cleanReviewOpinionBody(limitSentences(ensureDealIdentityInOpinion(baseOpinion, data), 3));
+}
+
+function ensureDealIdentityInOpinion(value, data = {}) {
+  const base = cleanReviewOpinionBody(formatListItemText(value));
+  const identity = deriveDealIdentitySentence(data);
+  if (!identity) return base;
+  if (!isMeaningfulFact(base)) return identity;
+  if (opinionHasDealIdentity(base, data)) return base;
+  return `${identity} ${base}`;
+}
+
+function deriveDealIdentitySentence(data = {}) {
+  const dealName = firstUsefulDealText([data.assetName, data.fundName]);
+  const managerName = firstUsefulDealText([data.managerName]);
+  const classification = firstUsefulDealText([
+    data.regionAssetClass,
+    data.classification,
+    compactListText(data.overviewMetricRows, 2)
+  ]);
+  const reviewType = normalizeReviewType(data.reviewType || "");
+  const typeLabel = reviewType === "loan" ? "대출" : reviewType === "fund" ? "펀드" : "투자";
+  const genericSubject = reviewType === "loan" ? "대출 건" : reviewType === "fund" ? "펀드 건" : "투자 건";
+  const subject = [
+    managerName ? `${managerName}이 제안한` : "",
+    dealName || (managerName ? genericSubject : "")
+  ].filter(Boolean).join(" ");
+  if (subject && classification) {
+    return `본 건은 ${subject}${koreanEuroParticle(subject)}, ${classification} 성격의 ${typeLabel} 검토 건임.`;
+  }
+  if (subject) return `본 건은 ${subject}에 대한 ${typeLabel} 검토 건임.`;
+  if (classification) return `본 건은 ${classification} 성격의 ${typeLabel} 검토 건임.`;
+  return "";
+}
+
+function koreanEuroParticle(value) {
+  const chars = [...String(value || "").trim()];
+  const last = chars[chars.length - 1] || "";
+  const code = last.charCodeAt(0);
+  if (code < 0xac00 || code > 0xd7a3) return "로";
+  const jong = (code - 0xac00) % 28;
+  return jong === 0 || jong === 8 ? "로" : "으로";
+}
+
+function opinionHasDealIdentity(value, data = {}) {
+  const text = String(value || "");
+  const identityParts = [
+    data.assetName,
+    data.fundName,
+    data.managerName,
+    ...String(data.regionAssetClass || data.classification || "").split(/[\/,;·•|]+/g)
+  ].map(cleanFactValue).filter((item) => isUsefulDealText(item) && item.length >= 2);
+  if (identityParts.some((item) => text.includes(item))) return true;
+  return /본\s*건|본건|검토\s*건|대출\s*검토|펀드\s*검토|투자\s*검토/i.test(text)
+    && /대출|펀드|PF|부동산|인프라|Equity|Debt|Credit|주거|멀티패밀리|바이오|헬스케어|소프트웨어|소비재|이커머스/i.test(text);
+}
+
+function firstUsefulDealText(values) {
+  return asArray(values).map(cleanFactValue).find(isUsefulDealText) || "";
+}
+
+function isUsefulDealText(value) {
+  const text = String(value || "").trim();
+  return isMeaningfulFact(text)
+    && !/^(직접\s*입력|미입력)$/i.test(text)
+    && !/(확인\s*필요|자산명\s*확인|펀드명\s*\/\s*대출명|대출명\s*확인|펀드명\s*확인)/i.test(text);
+}
+
+function cleanReviewOpinionBody(value) {
+  return cleanReviewOpinionBullet(value)
+    .replace(/^\s*(?:[-•◈]\s*)?(?:결론|검토\s*의견\s*요약|투자\s*(?:매력|Highlight)|Why\s*This\s*Deal|핵심\s*리스크|Key\s*Risks|추가\s*확인\s*사항|추가확인사항|Next\s*DD\s*Items)\s*[:：]\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function inferConclusionFromTone(data = {}) {
+  const opinion = String(data.reviewOpinion || data.status || "");
+  if (/드랍|중단|부적합/i.test(opinion)) return "드랍 또는 검토 중단 검토 필요";
+  if (/보류/i.test(opinion)) return "보류 후 핵심 쟁점 해소 여부 확인 필요";
+  if (/긍정|진행/i.test(opinion)) return "조건부 추가 검토 진행 가능";
+  return "추가 검토 필요";
+}
+
+function splitOpinionText(value) {
+  const text = formatListItemText(value);
+  if (!text) return [];
+  const bulletItems = text
+    .split(/\n+|(?:^|\s)[•·]\s+|(?:^|\s)-\s+/)
+    .map((item) => item.replace(/^\d+[.)]\s*/, "").trim())
+    .filter(Boolean);
+  const source = bulletItems.length > 1 ? bulletItems : [text];
+  return source.flatMap((item) => {
+    const sentences = item.match(/[^.!?\n]+[.!?]?/g)?.map((part) => part.trim()).filter(Boolean) || [];
+    return sentences.length > 1 ? sentences : [item.trim()];
+  }).filter(Boolean);
+}
+
+function replaceTemplateOpinionSection(xml, data) {
+  const blocks = getWordBodyChildBlocks(xml);
+  const startIndex = blocks.findIndex((block) => normalizeWordSectionText(block.text).includes("03심사역검토의견"));
+  if (startIndex < 0) return xml;
+  const endIndex = blocks.findIndex((block, index) => index > startIndex && normalizeWordSectionText(block.text).includes("04핵심DDQ"));
+  if (endIndex < 0) return xml;
+  const replacement = finalWantedOpinionList(data, { limit: 5 }) || paragraph("심사역 검토 의견 확인 필요", { indentLeft: 360, hanging: 220, size: 19 });
+  return `${xml.slice(0, blocks[startIndex].end)}${replacement}${xml.slice(blocks[endIndex].start)}`;
+}
+
+function getWordBodyChildBlocks(xml) {
+  const bodyOpen = xml.match(/<w:body\b[^>]*>/);
+  const bodyCloseIndex = xml.lastIndexOf("</w:body>");
+  if (!bodyOpen || bodyCloseIndex < 0) return [];
+  const bodyStart = bodyOpen.index + bodyOpen[0].length;
+  const bodyXml = xml.slice(bodyStart, bodyCloseIndex);
+  const blocks = [];
+  const pattern = /<w:(p|tbl)\b[\s\S]*?<\/w:\1>/g;
+  let match;
+  while ((match = pattern.exec(bodyXml))) {
+    blocks.push({
+      block: match[0],
+      text: getWordText(match[0]),
+      start: bodyStart + match.index,
+      end: bodyStart + match.index + match[0].length
+    });
+  }
+  return blocks;
+}
+
+function getWordText(xml) {
+  return [...String(xml || "").matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g)]
+    .map((match) => unescapeXml(match[1]))
+    .join("");
+}
+
+function normalizeWordSectionText(value) {
+  return String(value || "").replace(/\s+/g, "").trim();
 }
 
 const TEMPLATE_OPINION_TEXTS = [
@@ -3598,6 +4202,16 @@ function replaceTemplateLiteral(xml, sourceText, nextText) {
   return xml.replace(escapeXml(sourceText), escapeXml(toEumseumStyle(nextText)));
 }
 
+function replaceAssetNamePlaceholder(xml, assetName) {
+  const safeName = escapeXml(toEumseumStyle(assetName || "자산명 확인 필요"));
+  let next = xml.replace(escapeXml("{{자산명}}"), safeName);
+  next = next.replace(
+    /(<w:t\b[^>]*>)\{\{(<\/w:t>[\s\S]*?<w:t\b[^>]*>)자산명(<\/w:t>[\s\S]*?<w:t\b[^>]*>)\}\}/,
+    `$1${safeName}$2$3`
+  );
+  return next;
+}
+
 function setSingleRowTableCells(tableXml, cellValues) {
   const rows = getXmlBlocks(tableXml, "tr");
   if (!rows.length) return tableXml;
@@ -3608,18 +4222,19 @@ function setSingleRowTableCells(tableXml, cellValues) {
 function setExistingTableRows(tableXml, rowValues, options = {}) {
   const rows = getXmlBlocks(tableXml, "tr");
   const updatedRows = rows.map((row, index) => {
-    const values = rowValues[index];
+    const values = rowValues[index - (options.startRow || 0)];
     return values ? setRowCellTexts(row, values, options) : row;
   });
   return setTableRows(tableXml, updatedRows);
 }
 
-function rebuildTableWithDataRows(tableXml, rowValues) {
+function rebuildTableWithDataRows(tableXml, rowValues, options = {}) {
   const rows = getXmlBlocks(tableXml, "tr");
   if (!rows.length) return tableXml;
-  const header = rows[0];
-  const dataTemplate = rows[1] || rows[0];
-  const nextRows = [header, ...rowValues.map((values) => setRowCellTexts(dataTemplate, values))];
+  const headerRows = Math.max(1, options.headerRows || 1);
+  const headers = rows.slice(0, Math.min(headerRows, rows.length));
+  const dataTemplate = rows[headerRows] || rows[rows.length - 1] || rows[0];
+  const nextRows = [...headers, ...rowValues.map((values) => setRowCellTexts(dataTemplate, values))];
   return setTableRows(tableXml, nextRows);
 }
 
@@ -3681,7 +4296,7 @@ function fullReviewMemoBody(data) {
     finalWantedSectionHeader("02", "미팅 개요 (Meeting Overview)"),
     finalWantedMeetingOverviewTable(data),
     finalWantedSectionHeader("03", "심사역 검토 의견 (Reviewer's Opinion)"),
-    finalWantedOpinionList(data),
+    finalWantedOpinionTable(data),
     finalWantedSectionHeader("04", "핵심 DDQ — 미팅 Q&A 기록"),
     finalWantedDdqTable(data, 5),
     finalWantedSectionHeader("05", "주요 예상 리스크 (Key Risk Factors)"),
@@ -3713,7 +4328,7 @@ function titleBlock(data) {
 }
 
 function finalWantedTitleBlock(data, options = {}) {
-  const assetName = data.fundName || "자산명 확인 필요";
+  const assetName = assetNameForMemoTitle(data.assetName || data.fundName);
   return [
     paragraph(`${assetName} 검토 메모`, { align: "center", bold: true, size: options.compact ? 28 : 31, color: "0F172A" }),
     paragraph("GP Meeting Review Memo", { align: "center", bold: true, size: 18, color: "64748B" })
@@ -3730,12 +4345,13 @@ function finalWantedSectionHeader(number, title) {
 }
 
 function finalWantedSummaryTable(data) {
+  const summaryOpinion = buildSummaryOpinionText(data);
   const lines = [
-    `펀드명 / 대출명: ${data.fundName || "확인 필요"}`,
+    `${data.subjectLabel || "펀드명 / 대출명"}: ${data.fundName || data.assetName || "확인 필요"}`,
     `운용사(GP): ${data.managerName || "확인 필요"}`,
     `미팅일자: ${formatKoreanDate(data.meetingDate)}`,
     `검토 결과: ${data.reviewOpinion || "확인 필요"}`,
-    `심사역 의견: ${limitSentences(data.finalOpinion || data.oneLineView || "추가 DD 필요", 2)}`
+    `심사역 의견: ${summaryOpinion || "확인된 딜 정체성과 추가 DD 필요사항 확인 필요"}`
   ].map((text) => ({ text }));
   return finalWantedTable([9360], `<w:tr>${tableCell(lines, { width: 9360, fill: "F8FAFC" })}</w:tr>`, {
     cellMargin: tableMargins(120, 150, 120, 150)
@@ -3743,18 +4359,7 @@ function finalWantedSummaryTable(data) {
 }
 
 function finalWantedMeetingOverviewTable(data, options = {}) {
-  const overview = Object.fromEntries(data.overview || []);
-  const rows = [
-    ["미팅 일시", formatKoreanDate(data.meetingDate)],
-    ["장소", data.meetingLocation || "확인 필요"],
-    ["GP 참석자", data.gpAttendees || data.contactName || "확인 필요"],
-    ["당사 참석자", data.lpAttendees || `${profile.name || "담당자 확인 필요"} / ${profile.department || "부서 확인 필요"}`],
-    ["지역 / 자산군", data.regionAssetClass || [overview["투자 지역"], data.classification].filter(Boolean).join(" / ") || "확인 필요"],
-    ["펀드 규모 / 대출 규모", data.sizeOrLoanAmount || overview["펀드 규모 / 대출 규모"] || "확인 필요"],
-    ["투자 기간 / 대출만기", data.periodOrMaturity || overview["투자 기간 / 대출만기"] || "확인 필요"],
-    ["목표 수익률 / 대출금리", data.returnOrLoanRate || overview["목표 수익률 / 대출금리"] || "확인 필요"],
-    ["당사 검토 약정액", data.commitmentAmount || overview["당사 검토 약정액"] || "직접 입력"]
-  ];
+  const rows = buildMeetingOverviewRowsForDocx(data);
   const visibleRows = options.compact ? rows.slice(0, 6) : rows;
   return finalWantedTable([1700, 7660], visibleRows.map(([label, value]) => `
     <w:tr>
@@ -3765,14 +4370,26 @@ function finalWantedMeetingOverviewTable(data, options = {}) {
 }
 
 function finalWantedOpinionList(data, options = {}) {
-  const opinionItems = [
-    data.oneLineView,
-    ...asArray(data.evidence),
-    data.riskView,
-    data.finalOpinion
-  ].filter(Boolean).map((item) => `• ${limitSentences(formatListItemText(item), 2)}`);
   const limit = options.limit || 5;
+  const opinionItems = deriveTemplateOpinionLines(data, limit)
+    .map((item) => `• ${limitSentences(formatListItemText(item), 2)}`);
   return opinionItems.slice(0, limit).map((item) => paragraph(item, { indentLeft: 360, hanging: 220, size: 19 })).join("");
+}
+
+function finalWantedOpinionTable(data) {
+  const lines = deriveStructuredReviewOpinionLines(data);
+  const rows = [
+    ["검토 의견 요약", lines[0] || "검토 의견 확인 필요"],
+    ["투자 Highlight", lines[1] || "투자 매력 확인 필요"],
+    ["핵심 리스크", lines[2] || "핵심 리스크 확인 필요"],
+    ["추가 확인사항", lines[3] || "추가 확인사항 확인 필요"]
+  ];
+  return finalWantedTable([1700, 7660], rows.map(([label, value]) => `
+    <w:tr>
+      ${tableCell(label, { width: 1700, fill: "F8FAFC", bold: true, color: "334155", align: "center" })}
+      ${tableCell(value, { width: 7660 })}
+    </w:tr>
+  `).join(""));
 }
 
 function finalWantedDdqTable(data, limit = 5) {
@@ -4052,6 +4669,15 @@ function escapeXml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+function unescapeXml(value) {
+  return String(value ?? "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
 }
 
 function insertTimestamp() {
@@ -4452,6 +5078,14 @@ function labelize(key) {
     investmentStructure: "투자구조",
     keyConcerns: "딜 / 자산 메모",
     capitalStructure: "투자구조",
+    region: "지역",
+    targetSize: "펀드 규모",
+    loanSize: "대출 규모",
+    investmentPeriod: "투자 기간",
+    loanMaturity: "대출만기",
+    targetReturn: "목표 수익률",
+    loanRate: "대출금리",
+    commitmentAmount: "당사 검토 약정액",
     keyNumbers: "핵심 숫자"
   };
   return labels[key] || key;
