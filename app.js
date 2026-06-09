@@ -2764,13 +2764,28 @@ async function callGeminiWithSearch(prompt) {
   for (const model of candidates) {
     try {
       let response = await callGeminiModel(model, buildGeminiSearchRequestBody(prompt), { response: "full" });
+      let traceOnlyResponse = null;
+      if (!hasUsableGroundingMetadata(response.groundingMetadata)
+        && hasSearchExecutionMetadata(response.groundingMetadata)
+        && !isIrrelevantGroundingResponse(response, prompt)) {
+        traceOnlyResponse = response;
+      }
       if (!hasUsableGroundingMetadata(response.groundingMetadata)) {
         failures.push({
           model,
           reason: "no_grounding_metadata",
-          rawMessage: "The first search-grounding response did not include grounding chunks. Retrying with an explicit search instruction."
+          rawMessage: hasSearchExecutionMetadata(response.groundingMetadata)
+            ? "The first search-grounding response included search-query metadata but no grounding chunks. Retrying once to request richer source chunks."
+            : "The first search-grounding response did not include grounding chunks. Retrying with an explicit search instruction."
         });
-        response = await callGeminiModel(model, buildGeminiSearchRequestBody(buildGroundingRequiredPrompt(prompt)), { response: "full" });
+        const retryResponse = await callGeminiModel(model, buildGeminiSearchRequestBody(buildGroundingRequiredPrompt(prompt)), { response: "full" });
+        if (hasUsableGroundingMetadata(retryResponse.groundingMetadata)
+          || (hasSearchExecutionMetadata(retryResponse.groundingMetadata) && !isIrrelevantGroundingResponse(retryResponse, prompt))
+          || !traceOnlyResponse) {
+          response = retryResponse;
+        } else {
+          response = traceOnlyResponse;
+        }
       }
       if (hasUsableGroundingMetadata(response.groundingMetadata)) {
         if (isIrrelevantGroundingResponse(response, prompt)) {
