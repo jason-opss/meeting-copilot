@@ -12,13 +12,13 @@ const TEXT_GENERATION_ALLOWED_MODELS = [
   "gemini-3.1-flash-lite",
   "gemini-3.5-flash"
 ];
-const SEARCH_GROUNDING_MODEL = "gemini-2.5-flash-lite";
+const SEARCH_GROUNDING_MODEL = "gemini-2.5-flash";
 const SEARCH_GROUNDING_MODEL_CANDIDATES = [
-  "gemini-3.5-flash",
-  "gemini-3.1-flash-lite",
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
-  "gemini-2.0-flash"
+  "gemini-2.0-flash",
+  "gemini-3.5-flash",
+  "gemini-3.1-flash-lite"
 ];
 const IM_TEXT_LIMITS = {
   focused: 160000,
@@ -627,7 +627,7 @@ function makeInitial(name) {
 function renderProviderStatus() {
   if (!$("providerStatus")) return;
   const base = runtimeConfig.apiKey
-    ? `Gemini API Key가 현재 탭 메모리에만 적용되어 있습니다. 현재 모델: ${runtimeConfig.model || DEFAULT_MODEL} / 검색 그라운딩: ${lastSearchGroundingModelUsed || SEARCH_GROUNDING_MODEL} (설정 모델 → 3.5/3.1 → 2.5 → 2.0 순 fallback) / 적용 키: ${keyFingerprint(runtimeConfig.apiKey)}`
+    ? `Gemini API Key가 현재 탭 메모리에만 적용되어 있습니다. 현재 모델: ${runtimeConfig.model || DEFAULT_MODEL} / 검색 그라운딩: ${lastSearchGroundingModelUsed || SEARCH_GROUNDING_MODEL} (2.5 flash → 2.5 flash-lite → 2.0 순 fallback) / 적용 키: ${keyFingerprint(runtimeConfig.apiKey)}`
     : `Gemini API Key가 없습니다. AI 버튼을 실행하면 "${LIMIT_MESSAGE}" 메시지가 표시됩니다.`;
   const diagnostic = formatGeminiDiagnostic(lastGeminiDiagnostic);
   $("providerStatus").textContent = diagnostic ? `${base}\n${diagnostic}` : base;
@@ -1384,6 +1384,17 @@ function getAssetClassMarketChecklist() {
       `${regionScope} infrastructure transaction yield financing interest rate`,
       `${managerName} ${dealName} infrastructure project news`
     ];
+    if (/신재생|재생에너지|태양광|solar|photovoltaic|PV|RPS|REC|SMP|전력/i.test(sector)) {
+      checklist.push(
+        "국내 태양광 설치량, REC 가격, 전력도매가격(SMP), 계통접속/출력제어, PPA 및 재생에너지 입찰제 동향",
+        "RPS(신재생에너지 공급의무화 제도) 폐지·개편, 경매제 전환, 산업통상자원부 재생에너지 정책 뉴스"
+      );
+      prioritySearchQueries.push(
+        "한국 태양광 시장 동향 재생에너지 정책 2025 2026",
+        "한국 신재생에너지 공급의무화제도 RPS 폐지 개편 재생에너지 입찰제 산업통상자원부",
+        "한국 태양광 REC 가격 전력도매가격 SMP 동향 2025 2026"
+      );
+    }
   } else if (/상품금융|Commodity Finance/i.test(assetClass)) {
     checklist = [
       `${regionScope} 금리, 환율, 물류/교역량, 자산가치 환경`,
@@ -1450,7 +1461,7 @@ function buildMarketSearchQueries() {
     `${meeting.managerName || ""} ${meeting.fundName || ""} 운용사 거래 뉴스`,
     ...specific.specificSearchQueries,
     ...checklist.prioritySearchQueries
-  ].map((query) => query.replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 12);
+  ].map((query) => query.replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 20);
 }
 
 function buildBaselineMarketSearchQueries() {
@@ -1479,7 +1490,11 @@ function buildBaselineMarketSearchQueries() {
   if (/인프라|Infrastructure/i.test(assetClass)) {
     queries.push(`${regionScope} infrastructure investment market financing regulation yield 2026`);
   }
-  return mergeTextLists(queries.map((query) => query.replace(/\s+/g, " ").trim()).filter(Boolean)).slice(0, 6);
+  collectInvestmentThemeSearchSignals(buildMarketSearchCorpus(), meeting)
+    .flatMap((signal) => signal.queries)
+    .slice(0, 6)
+    .forEach((query) => queries.push(query));
+  return mergeTextLists(queries.map((query) => query.replace(/\s+/g, " ").trim()).filter(Boolean)).slice(0, 10);
 }
 
 function buildMarketSearchFocus() {
@@ -1559,6 +1574,19 @@ function extractSpecificMarketSearchSignals() {
     `${name} track record portfolio transaction`
   ]));
 
+  collectInvestmentThemeSearchSignals(corpus, meeting).forEach((signal) => {
+    addSignal(signal.type, signal.value, signal.queries);
+  });
+
+  if (/태양광|solar|photovoltaic|PV|신재생|재생에너지|RPS|REC|SMP|전력도매가격|공급의무화|입찰제|PPA|계통|출력제어/i.test(corpus)) {
+    addSignal("korea_solar_rps_policy", "국내 태양광 / RPS / REC / SMP", [
+      "한국 태양광 시장 동향 재생에너지 정책 2025 2026",
+      "한국 신재생에너지 공급의무화제도 RPS 폐지 개편 재생에너지 입찰제 산업통상자원부",
+      "한국 태양광 REC 가격 전력도매가격 SMP 동향 2025 2026",
+      "South Korea solar photovoltaic market Renewable Portfolio Standard policy reform auction system"
+    ]);
+  }
+
   const uniqueSignals = [];
   const seen = new Set();
   signals.forEach((signal) => {
@@ -1568,9 +1596,121 @@ function extractSpecificMarketSearchSignals() {
     uniqueSignals.push(signal);
   });
   return {
-    specificSignals: uniqueSignals.slice(0, 10),
-    specificSearchQueries: mergeTextLists(uniqueSignals.flatMap((signal) => signal.queries)).slice(0, 16)
+    specificSignals: uniqueSignals.slice(0, 14),
+    specificSearchQueries: mergeTextLists(uniqueSignals.flatMap((signal) => signal.queries)).slice(0, 24)
   };
+}
+
+function collectInvestmentThemeSearchSignals(corpus = "", meeting = {}) {
+  const detected = state.imProcessingResult?.imAnalysis?.autoDetectedFields || {};
+  const region = localizeDisplayTerm(meeting.locationType || detected.region || "");
+  const regionScope = region === "국내" ? "한국" : region === "해외" ? "해외 미국 글로벌" : (region || "주요 투자지역");
+  const assetClass = localizeDisplayTerm(meeting.assetClass || detected.assetClass || "");
+  const strategy = localizeDisplayTerm(meeting.strategy || detected.strategy || "");
+  const sector = localizeDisplayTerm(meeting.sector || detected.sector || "");
+  const fundOrDealName = meeting.fundName || detected.fundName || "";
+  const contextText = [corpus, assetClass, strategy, sector].join(" ");
+  const signals = [];
+  const addTheme = (type, value, queries) => {
+    const cleanValue = String(value || "").replace(/\s+/g, " ").trim();
+    if (!cleanValue) return;
+    signals.push({
+      type,
+      value: cleanValue,
+      queries: mergeTextLists(queries.map((query) => query.replace(/\s+/g, " ").trim()).filter(Boolean)).slice(0, 4)
+    });
+  };
+
+  const matchedThemes = getInvestmentThemeDefinitions()
+    .filter((definition) => definition.pattern.test(contextText))
+    .slice(0, 8);
+
+  matchedThemes.forEach((definition) => {
+    const value = definition.value({ regionScope, assetClass, strategy, sector, fundOrDealName, contextText });
+    addTheme(definition.type, value, definition.queries({ regionScope, assetClass, strategy, sector, fundOrDealName, value }));
+  });
+
+  return signals;
+}
+
+function getInvestmentThemeDefinitions() {
+  return [
+    {
+      type: "domestic_real_estate_sector",
+      pattern: /부동산|PF|브릿지론|본PF|공동주택|오피스텔|아파트|임대주택|오피스|물류센터|리테일|호텔|데이터센터|NPL|공실|캡레이트|분양|미분양|공사비|책임준공/i,
+      value: ({ sector, strategy }) => [sector, strategy, "부동산"].filter(Boolean).join(" / "),
+      queries: ({ regionScope, sector, strategy, fundOrDealName, value }) => [
+        `${regionScope} ${sector || value} 부동산 시장 임대 공실 거래 캡레이트 2025 2026`,
+        `${regionScope} 부동산 PF 대출 연체 리파이낸싱 브릿지론 공사비 2025 2026`,
+        `${sector || value} 인허가 분양 미분양 시공사 책임준공 리스크`,
+        `${fundOrDealName} ${sector || value} 부동산 프로젝트 뉴스`
+      ]
+    },
+    {
+      type: "global_property_sector",
+      pattern: /multifamily|multi-family|office|logistics|industrial|data center|datacenter|hotel|student housing|self storage|life science|construction loan|bridge loan|cap rate|vacancy|rent growth/i,
+      value: ({ sector, strategy }) => [sector, strategy, "global real estate"].filter(Boolean).join(" / "),
+      queries: ({ regionScope, sector, value }) => [
+        `${regionScope} ${sector || value} rent vacancy cap rate transaction volume 2025 2026`,
+        `${regionScope} ${sector || value} construction loan refinancing debt market 2025 2026`,
+        `${regionScope} ${sector || value} supply pipeline absorption occupancy investment market`
+      ]
+    },
+    {
+      type: "infrastructure_sector",
+      pattern: /인프라|Infrastructure|데이터센터|전력|송전|배전|발전|풍력|태양광|ESS|배터리|항만|공항|도로|철도|통신|광케이블|수처리|폐기물|LNG|도시가스|PPP|PPA|EPC|O&M|요금|사업권/i,
+      value: ({ sector, strategy }) => [sector, strategy, "인프라"].filter(Boolean).join(" / "),
+      queries: ({ regionScope, sector, value }) => [
+        `${regionScope} ${sector || value} infrastructure investment market regulation tariff demand 2025 2026`,
+        `${regionScope} ${sector || value} financing yield transaction infrastructure fund 2025 2026`,
+        `${sector || value} EPC O&M concession policy counterparty risk`,
+        `${sector || value} 수요 요금 규제 정책 인프라 투자 뉴스`
+      ]
+    },
+    {
+      type: "private_equity_sector",
+      pattern: /사모투자|Private Equity|PE|buyout|growth|venture|secondary|co-invest|테크|소프트웨어|SaaS|AI|반도체|헬스케어|바이오|소비재|이커머스|산업재|금융서비스|교육|콘텐츠|플랫폼|제조/i,
+      value: ({ sector, strategy }) => [sector, strategy, "private equity"].filter(Boolean).join(" / "),
+      queries: ({ regionScope, sector, strategy, value }) => [
+        `${regionScope} ${sector || value} private equity M&A IPO exit valuation 2025 2026`,
+        `${regionScope} ${strategy || "buyout growth"} private equity fundraising deal activity exits 2025 2026`,
+        `${sector || value} industry growth margin regulation competition market 2025 2026`,
+        `${sector || value} private equity portfolio company transaction news`
+      ]
+    },
+    {
+      type: "private_credit_sector",
+      pattern: /사모대출|Private Debt|PD|private credit|direct lending|unitranche|mezzanine|메자닌|structured credit|leveraged loan|NAV financing|담보대출|선순위|후순위|코버넌트|default|부실률|리파이낸싱|refinancing|covenant/i,
+      value: ({ sector, strategy }) => [sector, strategy, "private credit"].filter(Boolean).join(" / "),
+      queries: ({ regionScope, sector, strategy, value }) => [
+        `${regionScope} private credit direct lending credit spread default refinancing 2025 2026`,
+        `${regionScope} ${strategy || value} covenant risk borrower default rate private debt 2025 2026`,
+        `${sector || value} borrower cash flow collateral recovery refinancing risk`,
+        `${regionScope} leveraged loan private credit fundraising deployment 2025 2026`
+      ]
+    },
+    {
+      type: "commodity_finance_sector",
+      pattern: /상품금융|항공기|aircraft|aviation|선박|shipping|vessel|tanker|bulk carrier|container ship|LNG carrier|리스료|lease rate|운임|freight|charter|잔존가치|residual value|balloon|balloon repayment/i,
+      value: ({ sector, strategy }) => [sector, strategy, "asset finance"].filter(Boolean).join(" / "),
+      queries: ({ regionScope, sector, value }) => [
+        `${regionScope} ${sector || value} lease rate residual value market 2025 2026`,
+        `${sector || value} freight charter rate asset value secondary market 2025 2026`,
+        `${sector || value} finance balloon repayment collateral repossession risk`,
+        `${sector || value} lessee credit airline shipping market news`
+      ]
+    },
+    {
+      type: "macro_financing_context",
+      pattern: /금리|환율|인플레이션|기준금리|스프레드|조달|리파이낸싱|유동성|레버리지|DSCR|LTV|IRR|cap rate|valuation|multiple|spread/i,
+      value: ({ assetClass, sector, strategy }) => [assetClass, sector, strategy, "financing context"].filter(Boolean).join(" / "),
+      queries: ({ regionScope, assetClass, sector, value }) => [
+        `${regionScope} ${assetClass || value} investment financing market interest rate spread liquidity 2025 2026`,
+        `${regionScope} ${sector || assetClass || value} valuation cap rate multiple financing cost 2025 2026`,
+        `${regionScope} institutional investment market risk refinancing liquidity 2025 2026`
+      ]
+    }
+  ];
 }
 
 function buildMarketSearchCorpus() {
@@ -1610,6 +1750,14 @@ function describeSpecificSearchPurpose(type) {
   if (type === "global_property_pf") return "해외 부동산 PF는 도시별 임대료, 공실률, 캡레이트, 공급 파이프라인, 건설대출·리파이낸싱 환경을 확인합니다.";
   if (type === "regional_pe_strategy") return "지역·전략형 PE는 거래량, Exit, 밸류에이션, 펀드레이징, 조달 환경을 확인합니다.";
   if (type === "named_party") return "운용사·관계사명은 최근 뉴스, 보도자료, 소송·제재·신용 이슈, 트랙레코드와 거래 관련성을 확인합니다.";
+  if (type === "korea_solar_rps_policy") return "국내 태양광·신재생에너지 투자는 태양광 시장 동향, REC 가격, 전력도매가격(SMP), RPS 폐지·개편과 재생에너지 입찰제 전환 뉴스를 확인합니다.";
+  if (type === "domestic_real_estate_sector") return "국내 부동산은 임대·공실·거래·캡레이트와 PF 조달, 연체, 공사비, 인허가·분양 리스크를 확인합니다.";
+  if (type === "global_property_sector") return "해외 부동산은 도시·섹터별 임대료, 공실률, 캡레이트, 거래량, 공급 파이프라인과 debt market을 확인합니다.";
+  if (type === "infrastructure_sector") return "인프라는 수요, 요금·규제, 사업권, EPC/O&M, 조달금리, 거래 수익률과 정책 변화를 확인합니다.";
+  if (type === "private_equity_sector") return "PE는 섹터 성장성, M&A/IPO/Exit, 밸류에이션, 펀드레이징, 포트폴리오 거래 뉴스를 확인합니다.";
+  if (type === "private_credit_sector") return "PD/크레딧은 스프레드, 부실률, 리파이낸싱, 차주 현금흐름, 담보·코버넌트 리스크를 확인합니다.";
+  if (type === "commodity_finance_sector") return "상품금융은 운임·리스료, 잔존가치, 담보 처분성, 차주/리스이용자 신용과 자산시장 변화를 확인합니다.";
+  if (type === "macro_financing_context") return "금리·환율·유동성·밸류에이션·조달비용이 해당 딜 구조와 상환/Exit에 미치는 영향을 확인합니다.";
   return "IM에서 확인된 구체 신호를 별도 검색 축으로 확인합니다.";
 }
 
@@ -1639,6 +1787,13 @@ ${commonKoreanOutputInstruction()}
 
 검색/분석 방식:
 - 아래 "검색 초점"의 자산군별 체크리스트를 기본 검색 흐름으로 사용하고, IM/입력값에서 발견되는 특이사항을 추가 검색 단서로 사용하세요.
+- 모든 검색어는 투자·경제·금융·정책 문맥으로 해석하세요. 약어 또는 일반 단어가 있으면 반드시 지역, 자산군, 섹터, 전략, 투자, 시장, 금리, 규제, 리스크 같은 단어와 결합해 검색하세요.
+- LP는 기관투자자 Limited Partner 의미입니다. LPGA, 골프, 스포츠는 절대 검색하지 마세요.
+- GP는 운용사/General Partner 의미입니다. 의료 GP, 일반 직업, 게임 용어로 해석하지 마세요.
+- PE는 Private Equity, PD는 Private Debt, PF는 Project Finance 의미입니다. 체육, 의료, 학교, 게임 용어로 해석하지 마세요.
+- RPS는 한국 신재생에너지 공급의무화 제도(Renewable Portfolio Standard) 의미입니다. Public Schools, school calendar, insurance, 게임/Minecraft SMP는 절대 검색하지 마세요.
+- REC는 한국 신재생에너지 공급인증서, SMP는 전력도매가격(System Marginal Price) 의미입니다. Recreation, Minecraft SMP, 학교 약어로 해석하지 마세요.
+- 태양광/신재생/RPS/REC/SMP가 검색 초점에 있으면 "한국 태양광 시장 동향 재생에너지 정책", "한국 신재생에너지 공급의무화제도 RPS 폐지 개편 재생에너지 입찰제 산업통상자원부", "한국 태양광 REC 가격 전력도매가격 SMP 동향"을 반드시 별도 검색하세요.
 - 검색 초점의 specificSignals/specificSearchQueries는 IM에서 확인된 구체 사업지·도시·전략·운용사·관계사 신호입니다. 이 항목들은 기본 시장동향과 별도로 반드시 검색하세요.
 - 예: "경기도 오산세교 PF"는 오산세교 사업지 뉴스, 인허가, 분양/미분양, 지역 부동산 경기, PF 대출·시공사·신탁사 이슈를 확인합니다.
 - 예: "Dallas multifamily PF"는 Dallas multifamily 임대료, 공실률, 캡레이트, 공급 파이프라인, construction loan/refinancing 환경을 확인합니다.
@@ -1685,7 +1840,7 @@ JSON 스키마:
   let detailedError = null;
   try {
     const response = await callGeminiWithSearch(prompt);
-    const parsed = parseGeminiJson(response.text);
+    const parsed = coerceMarketContextShape(parseGeminiJson(response.text));
     detailedContext = sanitizeGroundedMarketContext(parsed, response.groundingMetadata);
     if (hasAnyMarketEvidence(detailedContext)) return detailedContext;
   } catch (error) {
@@ -1699,9 +1854,62 @@ JSON 스키마:
     priorFailure: detailedError?.message || detailedContext?.sourceQuality || ""
   });
   const baselineResponse = await callGeminiWithSearch(baselinePrompt);
-  const baselineParsed = parseGeminiJson(baselineResponse.text);
+  const baselineParsed = coerceMarketContextShape(parseGeminiJson(baselineResponse.text));
   const baselineContext = sanitizeGroundedMarketContext(baselineParsed, baselineResponse.groundingMetadata);
   return mergeMarketContexts(detailedContext, baselineContext);
+}
+
+function coerceMarketContextShape(value) {
+  if (Array.isArray(value)) return classifyFlatMarketItems(value);
+  if (!value || typeof value !== "object") return {};
+  if (Array.isArray(value.items)) {
+    const classified = classifyFlatMarketItems(value.items);
+    return {
+      ...classified,
+      summary: value.summary || "",
+      lpQuestions: value.lpQuestions || [],
+      followUpRequests: value.followUpRequests || [],
+      sourceQuality: value.sourceQuality || classified.sourceQuality || ""
+    };
+  }
+  return value;
+}
+
+function classifyFlatMarketItems(items = []) {
+  const context = {
+    summary: "",
+    directDealEvents: [],
+    keyMarketTrends: [],
+    recentEvents: [],
+    policyRegulatoryNotes: [],
+    riskSignals: [],
+    lpQuestions: [],
+    followUpRequests: [],
+    sources: [],
+    sourceQuality: "검색 응답이 평면 목록으로 반환되어 항목별 키워드로 시장/정책/리스크를 재분류했습니다."
+  };
+  asArray(items).forEach((item) => {
+    const text = formatListItemText(item);
+    if (/RPS|공급의무화|입찰제|경매제|산업통상자원부|재생에너지\s*정책|Renewable Portfolio Standard|REC|SMP|전력도매가격/i.test(text)) {
+      context.policyRegulatoryNotes.push(item);
+    } else if (/리스크|계통|출력제어|가격\s*변동|전력망|grid|curtailment|penalty|부담|distortion/i.test(text)) {
+      context.riskSignals.push(item);
+    } else {
+      context.keyMarketTrends.push(item);
+    }
+    context.sources.push({
+      date: item?.date || item?.publishedAt || item?.asOfDate || "",
+      source: item?.source || "",
+      title: item?.title || item?.headline || item?.name || "",
+      url: item?.url || item?.sourceUrl || item?.uri || item?.link || "",
+      note: item?.relevance || item?.fact || item?.note || ""
+    });
+  });
+  context.keyMarketTrends = context.keyMarketTrends.slice(0, 5);
+  context.policyRegulatoryNotes = context.policyRegulatoryNotes.slice(0, 5);
+  context.riskSignals = context.riskSignals.slice(0, 5);
+  context.sources = context.sources.slice(0, 8);
+  return context;
 }
 
 function buildBaselineMarketContextPrompt({ searchFocus, searchDateText, recencyCutoffText, priorFailure }) {
@@ -1718,6 +1926,11 @@ ${JSON.stringify(searchFocus.baselineMarketQueries || [], null, 2)}
 검색/작성 원칙:
 - Google Search grounding 도구를 반드시 실행하세요.
 - 내부 지식만으로 답하지 말고, 검색 결과에 출처 메타데이터가 붙는 공개 자료만 사용하세요.
+- 모든 검색어는 투자·경제·금융·정책 문맥으로 해석하고, 지역·자산군·섹터·전략과 함께 검색하세요.
+- LP는 기관투자자 Limited Partner 의미입니다. LPGA, 골프, 스포츠는 검색하지 마세요.
+- GP는 General Partner/운용사, PE는 Private Equity, PD는 Private Debt, PF는 Project Finance 의미입니다. 의료·학교·스포츠·게임 문맥으로 검색하지 마세요.
+- RPS는 한국 신재생에너지 공급의무화 제도 의미입니다. Public Schools, school calendar, insurance, Minecraft SMP는 검색하지 마세요.
+- 검색 초점에 태양광/RPS/REC/SMP가 있으면 한국 태양광, 신재생에너지 공급의무화 제도, REC 가격, 전력도매가격, 산업통상자원부 정책 자료를 우선 검색하세요.
 - 국내 부동산이면 국내 부동산 경기, PF/대출, 거래량, 공실/임대, 금리 영향을 다룹니다.
 - 해외/사모투자이면 북미 또는 주요 글로벌 private equity 시장의 fundraising, deal activity, exits, valuation, financing 동향을 다룹니다.
 - 직접 관련 뉴스가 없어도 keyMarketTrends, policyRegulatoryNotes, riskSignals에는 지역·자산군 기준의 기본 시장동향을 채우세요.
@@ -1968,8 +2181,11 @@ function findGroundingUrlForItem(item, chunks = []) {
 
 function normalizeSourceUrl(value = "") {
   const text = String(value || "").trim();
-  if (!/^https?:\/\//i.test(text)) return "";
-  return text;
+  const urls = text.match(/https?:\/\/[^\s"',<>]+/gi) || [];
+  const cleaned = urls
+    .map((url) => url.replace(/[),.;]+$/g, ""))
+    .filter(Boolean);
+  return cleaned.find((url) => !/grounding-api-redirect/i.test(url)) || cleaned[0] || "";
 }
 
 function decodeSearchEntryPointSdkBlob(sdkBlob = "") {
@@ -2557,10 +2773,34 @@ async function callGeminiWithSearch(prompt) {
         response = await callGeminiModel(model, buildGeminiSearchRequestBody(buildGroundingRequiredPrompt(prompt)), { response: "full" });
       }
       if (hasUsableGroundingMetadata(response.groundingMetadata)) {
+        if (isIrrelevantGroundingResponse(response, prompt)) {
+          failures.push({
+            model,
+            reason: "irrelevant_search_queries",
+            rawMessage: `Irrelevant search queries: ${asArray(response.groundingMetadata?.webSearchQueries).join(", ")}`
+          });
+          response = await callGeminiModel(model, buildGeminiSearchRequestBody(buildDisambiguatedSearchPrompt(prompt)), { response: "full" });
+          if (isIrrelevantGroundingResponse(response, prompt)) {
+            failures.push({
+              model,
+              reason: "irrelevant_search_queries",
+              rawMessage: `Retry still irrelevant: ${asArray(response.groundingMetadata?.webSearchQueries).join(", ")}`
+            });
+            continue;
+          }
+        }
         lastSearchGroundingModelUsed = model;
         return response;
       }
       if (hasSearchExecutionMetadata(response.groundingMetadata)) {
+        if (isIrrelevantGroundingResponse(response, prompt)) {
+          failures.push({
+            model,
+            reason: "irrelevant_search_queries",
+            rawMessage: `Irrelevant search queries: ${asArray(response.groundingMetadata?.webSearchQueries).join(", ")}`
+          });
+          continue;
+        }
         lastSearchGroundingModelUsed = model;
         return response;
       }
@@ -2603,15 +2843,40 @@ function buildGroundingRequiredPrompt(prompt) {
 - 최근 뉴스/시장/정책/리스크 자료를 공개 웹에서 검색하고, 검색으로 확인된 출처가 있는 항목만 JSON에 넣으세요.
 - 검색 결과가 부족하면 배열을 비우되, 응답 자체는 grounding metadata가 붙도록 검색 쿼리를 실행하세요.
 - 검색에 사용할 우선 쿼리는 아래 요청의 suggestedSearchQueries, 지역, 섹터, 운용사명, 펀드명, 대출명, 프로젝트명입니다.
+- 모든 검색어는 투자·경제·금융·정책 문맥으로 해석하고 지역·자산군·섹터·전략과 결합해 검색하세요.
+- LP는 기관투자자 Limited Partner 의미입니다. LPGA, 골프, 스포츠를 검색하지 마세요.
+- GP는 General Partner/운용사, PE는 Private Equity, PD는 Private Debt, PF는 Project Finance 의미입니다. 의료·학교·스포츠·게임 문맥으로 검색하지 마세요.
+- RPS는 한국 신재생에너지 공급의무화 제도, REC는 신재생에너지 공급인증서, SMP는 전력도매가격 의미입니다. 학교, 보험, Minecraft, 게임 서버를 검색하지 마세요.
+
+${prompt}`;
+}
+
+function buildDisambiguatedSearchPrompt(prompt) {
+  return `
+이전 검색어가 약어를 잘못 해석했습니다. 아래 의미로 다시 검색하세요.
+- LP = 기관투자자 Limited Partner, 절대 LPGA/골프 아님
+- GP = General Partner/운용사, 절대 의료 GP 또는 일반 직업 검색 아님
+- PE = Private Equity, PD = Private Debt, PF = Project Finance
+- RPS = 한국 신재생에너지 공급의무화 제도(Renewable Portfolio Standard), 절대 Public Schools/학교 일정 아님
+- REC = 신재생에너지 공급인증서, 절대 recreation 아님
+- SMP = 전력도매가격(System Marginal Price), 절대 Minecraft SMP 아님
+
+검색어에는 반드시 지역, 자산군, 섹터, 전략, investment market, financing, regulation, risk 중 하나 이상을 함께 넣으세요.
+
+태양광/신재생/RPS/REC/SMP 관련 요청이면 반드시 아래 검색어를 우선 사용하세요:
+1. 한국 태양광 시장 동향 재생에너지 정책 2025 2026
+2. 한국 신재생에너지 공급의무화제도 RPS 폐지 개편 재생에너지 입찰제 산업통상자원부
+3. 한국 태양광 REC 가격 전력도매가격 SMP 동향 2025 2026
+4. South Korea solar photovoltaic market Renewable Portfolio Standard policy reform auction system
 
 ${prompt}`;
 }
 
 function buildSearchGroundingModelCandidates() {
   return [
-    runtimeConfig.model,
     SEARCH_GROUNDING_MODEL,
-    ...SEARCH_GROUNDING_MODEL_CANDIDATES
+    ...SEARCH_GROUNDING_MODEL_CANDIDATES,
+    runtimeConfig.model
   ]
     .map(normalizeGeminiModelName)
     .filter(Boolean)
@@ -2634,6 +2899,26 @@ function hasSearchExecutionMetadata(metadata) {
   return asArray(metadata?.webSearchQueries).length > 0
     || Boolean(metadata?.searchEntryPoint?.renderedContent)
     || Boolean(metadata?.searchEntryPoint?.sdkBlob);
+}
+
+function isIrrelevantGroundingResponse(response, prompt = "") {
+  const promptText = String(prompt || "");
+  const needsEnergyContext = /태양광|solar|photovoltaic|신재생|재생에너지|RPS|REC|SMP|전력도매가격|공급의무화|입찰제|Renewable Portfolio Standard/i.test(promptText);
+  const needsInvestmentContext = /기관\s*LP|대체투자|투자|운용사|펀드|대출|부동산|인프라|사모투자|Private Equity|Private Debt|Project Finance|investment|financing|market|regulation|risk/i.test(promptText);
+  const metadata = response?.groundingMetadata || {};
+  const searchText = [
+    ...asArray(metadata.webSearchQueries),
+    ...asArray(metadata.groundingChunks).map((chunk) => {
+      const web = chunk.web || chunk;
+      return [web.title, web.uri, web.domain].filter(Boolean).join(" ");
+    }),
+    response?.text || ""
+  ].join(" ");
+  const hasEnergyHit = /태양광|solar|photovoltaic|신재생|재생에너지|Renewable Portfolio Standard|공급의무화|REC\s*가격|전력도매가격|산업통상자원부|auction system|renewable/i.test(searchText);
+  const hasInvestmentHit = /investment|private equity|private debt|project finance|real estate|infrastructure|credit|loan|fund|fundraising|M&A|valuation|cap rate|vacancy|refinancing|regulation|policy|market|투자|부동산|인프라|사모|대출|펀드|금리|정책|규제|시장|거래|리스크/i.test(searchText);
+  const hasWrongHit = /LPGA|golf|Public Schools|school calendar|Richmond Public Schools|Rochester Public Schools|Minecraft|Lifesteal|Risk Placement Services|insurance broker|Top Minecraft|reddit|sports|game server/i.test(searchText);
+  if (needsEnergyContext) return hasWrongHit && !hasEnergyHit;
+  return needsInvestmentContext && hasWrongHit && !hasInvestmentHit;
 }
 
 function shouldTryNextSearchGroundingModel(error) {
@@ -2877,19 +3162,36 @@ function parseGeminiJson(text) {
   try {
     return JSON.parse(stripped);
   } catch {
-    const jsonObject = extractFirstJsonObject(stripped);
-    if (jsonObject) return JSON.parse(jsonObject);
+    const jsonValue = extractFirstJsonValue(stripped);
+    if (jsonValue) return JSON.parse(jsonValue);
     throw new Error(LIMIT_MESSAGE);
   }
 }
 
 function extractFirstJsonObject(text) {
-  const start = text.indexOf("{");
-  if (start < 0) return "";
+  return extractFirstJsonValue(text, "{");
+}
+
+function extractFirstJsonValue(text, preferredStart = "") {
+  const starts = preferredStart ? [preferredStart] : ["{", "["];
+  const candidates = starts
+    .map((startChar) => ({ startChar, index: text.indexOf(startChar) }))
+    .filter((item) => item.index >= 0)
+    .sort((a, b) => a.index - b.index);
+  for (const candidate of candidates) {
+    const extracted = extractJsonFromIndex(text, candidate.index, candidate.startChar);
+    if (extracted) return extracted;
+  }
+  return "";
+}
+
+function extractJsonFromIndex(text, startIndex, startChar) {
+  if (startIndex < 0) return "";
+  const endChar = startChar === "[" ? "]" : "}";
   let depth = 0;
   let inString = false;
   let escaping = false;
-  for (let index = start; index < text.length; index += 1) {
+  for (let index = startIndex; index < text.length; index += 1) {
     const char = text[index];
     if (inString) {
       if (escaping) {
@@ -2905,10 +3207,10 @@ function extractFirstJsonObject(text) {
       inString = true;
       continue;
     }
-    if (char === "{") depth += 1;
-    if (char === "}") {
+    if (char === startChar) depth += 1;
+    if (char === endChar) {
       depth -= 1;
-      if (depth === 0) return text.slice(start, index + 1);
+      if (depth === 0) return text.slice(startIndex, index + 1);
     }
   }
   return "";
@@ -3012,8 +3314,13 @@ function normalizeGpQuestionReviewList(reviewedQuestions, originalQuestions = []
 function buildMarketDerivedGpQuestions() {
   const marketText = JSON.stringify(state.marketContext || {});
   const questions = [];
+  const addQuestion = (item) => {
+    if (!questions.some((question) => normalizeFactKey(question.question) === normalizeFactKey(item.question))) {
+      questions.push(item);
+    }
+  };
   if (/경영권|매각|인수|지분|최대주주|주주\s*변경|ownership|sale|acquisition/i.test(marketText)) {
-    questions.push({
+    addQuestion({
       category: "Alignment",
       importance: "High",
       question: "운용사 또는 주요 관계자의 경영권 매각·주주 변경 이슈가 본 건 담당 조직, IC 의사결정 라인, 핵심인력 유지 조건, LP 커뮤니케이션 체계에 미치는 영향은 무엇이며, 변동 발생 시 어떤 통지·승인 절차가 적용됩니까?",
@@ -3022,7 +3329,7 @@ function buildMarketDerivedGpQuestions() {
     });
   }
   if (/핵심인력|인력|조직|담당팀|이탈|변동|key person|team/i.test(marketText)) {
-    questions.push({
+    addQuestion({
       category: "트랙레코드",
       importance: "High",
       question: "본 건을 담당하는 핵심 운용역과 실무팀 구성, 최근 12개월 내 인력 변동 여부, key person 또는 담당자 변경 시 LP에게 제공되는 보고·승인·보완 절차는 어떻게 정리되어 있습니까?",
@@ -3031,7 +3338,7 @@ function buildMarketDerivedGpQuestions() {
     });
   }
   if (/시공사|건설|책임준공|재무|신용|등급|유동성|소송|제재|부실|construction|credit|litigation/i.test(marketText)) {
-    questions.push({
+    addQuestion({
       category: "리스크",
       importance: "High",
       question: "시공사, 신탁사, 스폰서 등 주요 관계자의 재무·신용·소송·책임준공 관련 이슈가 본 건의 공정, 담보가치, 보증 이행 및 대주단 권리에 미치는 영향과 보완 장치는 무엇입니까?",
@@ -3039,7 +3346,70 @@ function buildMarketDerivedGpQuestions() {
       source: "시장/관계자 뉴스"
     });
   }
-  return questions;
+  if (/공실|임대료|렌트|캡레이트|cap\s*rate|vacancy|rent|거래량|transaction|absorption|공급\s*파이프라인/i.test(marketText)) {
+    addQuestion({
+      category: "시장/임대",
+      importance: "High",
+      question: "최근 시장 자료상 임대료, 공실률, 거래량, 캡레이트 또는 공급 파이프라인 변화가 본 건의 임대수익, 매각가정, 담보가치와 LTV/DSCR 민감도에 어떻게 반영되어 있습니까?",
+      rationale: "부동산·실물자산 시장지표가 투자수익률과 회수 가능성에 직접 영향",
+      source: "시장 검색"
+    });
+  }
+  if (/PF|브릿지론|본PF|리파이낸싱|refinancing|연체|delinquency|construction loan|debt market|조달/i.test(marketText)) {
+    addQuestion({
+      category: "구조/상환",
+      importance: "High",
+      question: "최근 PF·대출·리파이낸싱 시장 환경을 감안할 때 본 건의 만기상환, 차환 가능성, 금리 민감도, 대주단 권리 및 EOD 발생 시 회수 시나리오는 어떻게 검토되어 있습니까?",
+      rationale: "조달환경과 차환 가능성이 대출형·개발형 거래의 핵심 리스크",
+      source: "시장 검색"
+    });
+  }
+  if (/valuation|밸류에이션|multiple|멀티플|M&A|IPO|exit|회수|fundraising|deal activity|dry powder/i.test(marketText)) {
+    addQuestion({
+      category: "상환·Exit",
+      importance: "High",
+      question: "최근 섹터 밸류에이션, M&A/IPO/Exit 환경, 펀드레이징 및 거래량 변화를 감안할 때 본 건의 진입가격, 회수 경로, 다운사이드 보호장치는 어떻게 설정되어 있습니까?",
+      rationale: "PE·성장투자에서 시장 밸류에이션과 Exit 환경은 회수 가능성의 핵심 변수",
+      source: "시장 검색"
+    });
+  }
+  if (/spread|스프레드|default|부실률|covenant|코버넌트|borrower|차주|담보|recovery|private credit|direct lending/i.test(marketText)) {
+    addQuestion({
+      category: "담보·보증",
+      importance: "High",
+      question: "최근 크레딧 스프레드, 부실률, 차주 현금흐름 및 담보가치 변화를 감안할 때 본 건의 코버넌트, 담보보전, 선순위성, 회수율 가정은 어떻게 검증되어 있습니까?",
+      rationale: "PD·크레딧 거래에서 시장 스프레드와 차주/담보 리스크가 손실 가능성에 직접 영향",
+      source: "시장 검색"
+    });
+  }
+  if (/요금|tariff|regulation|규제|정책|사업권|concession|EPC|O&M|수요|demand|이용량|계약상대방|counterparty/i.test(marketText)) {
+    addQuestion({
+      category: "리스크",
+      importance: "High",
+      question: "최근 정책·규제·요금체계·수요 변화가 본 인프라 자산의 매출 안정성, 계약상대방 리스크, EPC/O&M 책임 및 사업권 조건에 미치는 영향은 어떻게 반영되어 있습니까?",
+      rationale: "인프라 투자는 규제·요금·수요·계약 구조 변화가 현금흐름 안정성에 직접 영향",
+      source: "시장 검색"
+    });
+  }
+  if (/REC|SMP|전력도매가격|RPS|공급의무화|입찰제|PPA|계통|출력제어|재생에너지|태양광|풍력/i.test(marketText)) {
+    addQuestion({
+      category: "정책/시장",
+      importance: "High",
+      question: "최근 RPS 개편, REC 가격, 전력도매가격(SMP), PPA·입찰제, 계통접속 및 출력제어 이슈가 본 건의 전력판매 수익, 가격 헤지, DSCR 및 다운사이드 시나리오에 어떻게 반영되어 있습니까?",
+      rationale: "신재생 인프라의 매출과 변동성은 정책·가격·계통 이슈에 직접 영향",
+      source: "시장 검색"
+    });
+  }
+  if (/lease rate|리스료|residual value|잔존가치|freight|운임|charter|asset value|secondary market|balloon/i.test(marketText)) {
+    addQuestion({
+      category: "상환·Exit",
+      importance: "High",
+      question: "최근 운임, 리스료, 중고자산 가격과 잔존가치 변동을 감안할 때 본 건의 Balloon 상환, 재리스·재매각 가능성, 담보 처분 시나리오는 어떻게 검증되어 있습니까?",
+      rationale: "상품금융은 자산가치와 리스/운임 시장 변화가 상환재원과 담보가치에 직접 영향",
+      source: "시장 검색"
+    });
+  }
+  return questions.slice(0, 5);
 }
 
 function rewriteQuestionForGpAudience(item) {
